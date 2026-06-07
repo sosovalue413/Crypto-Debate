@@ -26,6 +26,12 @@ function validateWalletAddress(walletAddress: string | undefined) {
   return trimmed
 }
 
+function optionalEnv(name: string) {
+  const value = process.env[name]?.trim()
+
+  return value || null
+}
+
 export function buildSodexOrderIntent(input: {
   symbol: string
   side: "buy" | "sell"
@@ -49,20 +55,23 @@ export function buildSodexOrderIntent(input: {
   const side: "BUY" | "SELL" = isBuy ? "BUY" : "SELL"
   const walletAddress = validateWalletAddress(input.walletAddress)
   const amount = formatOrderAmount(input.amount)
+  const accountID = optionalEnv("SODEX_ACCOUNT_ID")
+  const verifyingContract = optionalEnv("SODEX_EIP712_VERIFYING_CONTRACT")
   const clientOrderId = `cd-${stableId(
     `${input.symbol}-${input.side}-${amount}-${Date.now()}`,
   )}`
-  const accountID = "<resolve-accountID-from-signer>"
   const unresolved = [
     walletAddress ? "" : "signer wallet",
-    "SoDEX accountID",
+    accountID ? "" : "SoDEX accountID",
     "symbolID and precision rules from /markets/symbols",
-    "EIP-712 payload hash",
+    verifyingContract ? "" : "EIP-712 verifying contract",
+    "EIP-712 payload hash and signature",
   ].filter(Boolean)
   const missing = [
     walletAddress ? "" : "wallet signer",
-    "SoDEX accountID",
+    accountID ? "" : "SoDEX accountID",
     "symbolID and precision validation",
+    verifyingContract ? "" : "EIP-712 verifying contract",
     "EIP-712 signature",
     "X-API-Nonce header",
   ].filter(Boolean)
@@ -120,7 +129,7 @@ export function buildSodexOrderIntent(input: {
         name: "spot",
         version: "1",
         chainId: endpoint.includes("mainnet") ? 286623 : 138565,
-        verifyingContract: "0x0000000000000000000000000000000000000000",
+        verifyingContract,
       },
       submitPath: "/trade/orders/batch",
       requiredHeaders: ["X-API-Sign", "X-API-Nonce"],
@@ -139,7 +148,13 @@ export function buildSodexOrderIntent(input: {
         walletAddress
           ? "Use the connected wallet as the signer."
           : "Connect a signer-controlled account.",
-        "Resolve the SoDEX accountID and symbol trading rules.",
+        accountID
+          ? "Use the configured SoDEX accountID."
+          : "Resolve the SoDEX accountID.",
+        "Resolve symbol trading rules and precision.",
+        verifyingContract
+          ? "Use the configured EIP-712 verifying contract."
+          : "Configure the SoDEX EIP-712 verifying contract.",
         "Sign the ExchangeAction payload with EIP-712.",
         "Submit the signed batch to the SoDEX write endpoint after user confirmation.",
       ],

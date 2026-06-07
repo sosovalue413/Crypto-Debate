@@ -7,11 +7,9 @@ import {
   BrainCircuit,
   Check,
   Clipboard,
-  Database,
   ExternalLink,
   Gavel,
   Loader2,
-  Search,
   ShieldCheck,
   Sparkles,
   ThumbsUp,
@@ -41,7 +39,6 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type {
-  AssetVoteHistory,
   DebateResult,
   DebateSide,
   DebateVotes,
@@ -74,12 +71,6 @@ type SodexState = {
   endpoint: string
   markets: SodexMarket[]
   status: "live" | "error"
-}
-
-type ArchivePayload = {
-  archive: DebateResult[]
-  assetVotes: AssetVoteHistory[]
-  storage: "redis" | "blob" | "file"
 }
 
 type Eip1193Provider = {
@@ -115,13 +106,6 @@ export function HeroSection() {
   const [thesis, setThesis] = useState(examples[0])
   const [mode, setMode] = useState<"full" | "quick">("full")
   const [result, setResult] = useState<DebateResult | null>(null)
-  const [archive, setArchive] = useState<DebateResult[]>([])
-  const [assetVoteHistory, setAssetVoteHistory] = useState<AssetVoteHistory[]>(
-    [],
-  )
-  const [storageBackend, setStorageBackend] =
-    useState<ArchivePayload["storage"]>("file")
-  const [archiveQuery, setArchiveQuery] = useState("")
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(
     null,
   )
@@ -138,28 +122,6 @@ export function HeroSection() {
   const [intent, setIntent] = useState<SodexOrderIntent | null>(null)
   const [intentLoading, setIntentLoading] = useState(false)
   const [walletAddress, setWalletAddress] = useState<string | null>(null)
-
-  async function loadArchive() {
-    try {
-      const response = await fetch("/api/archive?limit=50")
-      const payload = (await response.json()) as ArchivePayload
-
-      setArchive(payload.archive ?? [])
-      setAssetVoteHistory(payload.assetVotes ?? [])
-      setStorageBackend(payload.storage ?? "file")
-
-      if (payload.archive?.length) {
-        window.localStorage.setItem(
-          "cryptodebate.archive",
-          JSON.stringify(payload.archive),
-        )
-      }
-    } catch {
-      setResult(result)
-      setUserVote(userVote)
-      return
-    }
-  }
 
   useEffect(() => {
     const storedVoterId = window.localStorage.getItem("cryptodebate.voterId")
@@ -178,18 +140,6 @@ export function HeroSection() {
     if (storedWallet) {
       setWalletAddress(storedWallet)
     }
-
-    const stored = window.localStorage.getItem("cryptodebate.archive")
-
-    if (stored) {
-      try {
-        setArchive(JSON.parse(stored) as DebateResult[])
-      } catch {
-        setArchive([])
-      }
-    }
-
-    void loadArchive()
   }, [])
 
   useEffect(() => {
@@ -228,39 +178,7 @@ export function HeroSection() {
     setSelectedEvidenceId(result.evidence[0]?.id ?? null)
     setIntentSide(result.winnerLean === "Bear" ? "sell" : "buy")
     setUserVote(readBallots()[result.id] ?? null)
-
-    const nextArchive = [
-      result,
-      ...archive.filter((item) => item.id !== result.id),
-    ].slice(0, 20)
-
-    setArchive(nextArchive)
-    window.localStorage.setItem(
-      "cryptodebate.archive",
-      JSON.stringify(nextArchive),
-    )
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result])
-
-  const filteredArchive = useMemo(() => {
-    const query = archiveQuery.toLowerCase().trim()
-
-    if (!query) {
-      return archive
-    }
-
-    return archive.filter((item) =>
-      [
-        item.thesis,
-        item.title,
-        item.assetSymbols.join(" "),
-        item.winnerLean,
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(query),
-    )
-  }, [archive, archiveQuery])
 
   const selectedEvidence = useMemo(() => {
     return (
@@ -312,7 +230,6 @@ export function HeroSection() {
       }
 
       setResult(payload as DebateResult)
-      void loadArchive()
       window.setTimeout(() => {
         document
           .getElementById("debate-floor")
@@ -376,26 +293,6 @@ export function HeroSection() {
       )
       writeBallot(result.id, payload.currentVote ?? vote)
       setUserVote(payload.currentVote ?? vote)
-      setArchive((current) =>
-        current.map((item) =>
-          item.id === result.id
-            ? { ...item, votes: payload.votes as DebateVotes }
-            : item,
-        ),
-      )
-
-      const archivePayload = payload as {
-        assetVotes?: AssetVoteHistory[]
-        storage?: ArchivePayload["storage"]
-      }
-
-      if (archivePayload.assetVotes) {
-        setAssetVoteHistory(archivePayload.assetVotes)
-      }
-
-      if (archivePayload.storage) {
-        setStorageBackend(archivePayload.storage)
-      }
     } catch (voteError) {
       setResult((current) =>
         current && current.id === result.id
@@ -403,11 +300,6 @@ export function HeroSection() {
           : current,
       )
       setUserVote(previousUserVote)
-      setArchive((current) =>
-        current.map((item) =>
-          item.id === result.id ? { ...item, votes: previousVotes } : item,
-        ),
-      )
       setError(
         voteError instanceof Error
           ? voteError.message
@@ -543,10 +435,22 @@ export function HeroSection() {
                 Evidence
               </a>
               <a
-                href="#archive"
+                href="/archive"
                 className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
               >
                 Archive <ExternalLink className="size-3" />
+              </a>
+              <a
+                href="/leaderboard"
+                className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Leaderboard <ExternalLink className="size-3" />
+              </a>
+              <a
+                href="/sodex"
+                className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                SoDEX <ExternalLink className="size-3" />
               </a>
               <a
                 href="/methodology"
@@ -794,84 +698,6 @@ export function HeroSection() {
           </div>
         </section>
 
-        <section
-          id="archive"
-          className="bg-[#05070b]/92 px-6 py-16 md:px-10"
-        >
-          <div className="mx-auto grid max-w-7xl gap-10 lg:grid-cols-[minmax(0,1fr)_360px]">
-            <div>
-              <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[#ffee03]">
-                    Archive and search
-                  </p>
-                  <h2 className="mt-3 font-[family-name:var(--font-display)] text-4xl font-bold tracking-normal md:text-5xl">
-                    Every debate becomes research memory
-                  </h2>
-                </div>
-                <div className="flex min-w-72 items-center gap-2 border-b border-white/20 pb-2 text-white/75">
-                  <Search className="size-4" />
-                  <input
-                    value={archiveQuery}
-                    onChange={(event) => setArchiveQuery(event.target.value)}
-                    className="w-full bg-transparent text-sm outline-none placeholder:text-white/35"
-                    placeholder="Search by token, thesis, or outcome"
-                  />
-                </div>
-                <a
-                  href="/archive"
-                  className="inline-flex items-center gap-1 text-sm text-[#ffee03] hover:text-white"
-                >
-                  Open public archive <ExternalLink className="size-3" />
-                </a>
-              </div>
-
-              <div className="mt-8 divide-y divide-white/10 border-y border-white/10">
-                {filteredArchive.length ? (
-                  filteredArchive.map((item) => (
-                    <button
-                      key={item.id}
-                      onClick={() => {
-                        setResult(item)
-                        document
-                          .getElementById("debate-floor")
-                          ?.scrollIntoView({ behavior: "smooth" })
-                      }}
-                      className="grid w-full gap-4 py-5 text-left transition hover:bg-white/[0.03] md:grid-cols-[1fr_160px_130px_120px]"
-                    >
-                      <div>
-                        <div className="font-semibold text-white">{item.thesis}</div>
-                        <div className="mt-1 text-sm text-white/55">
-                          {item.assetSymbols.join(", ") || "Market-wide"} ·{" "}
-                          {new Date(item.generatedAt).toLocaleString()}
-                        </div>
-                      </div>
-                      <div className="text-sm text-white/70">
-                        {item.evidence.length} evidence cards
-                      </div>
-                      <div className="text-sm text-white/70">
-                        {totalVotes(item.votes)} votes
-                      </div>
-                      <div className="font-[family-name:var(--font-display)] text-lg font-bold text-[#ffee03]">
-                        {item.winnerLean}
-                      </div>
-                    </button>
-                  ))
-                ) : (
-                  <div className="py-8 text-white/55">
-                    Run a debate and it will appear here instantly.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <Leaderboard
-              archive={archive}
-              assetVoteHistory={assetVoteHistory}
-              storage={storageBackend}
-            />
-          </div>
-        </section>
       </main>
     </>
   )
@@ -1724,106 +1550,6 @@ function EmptyWorkflow() {
           <div className="mt-2 text-sm leading-relaxed text-white/55">{copy}</div>
         </div>
       ))}
-    </div>
-  )
-}
-
-function Leaderboard({
-  archive,
-  assetVoteHistory,
-  storage,
-}: {
-  archive: DebateResult[]
-  assetVoteHistory: AssetVoteHistory[]
-  storage: ArchivePayload["storage"]
-}) {
-  const stats = useMemo(() => {
-    const debates = archive.length
-    const evidence = archive.reduce((sum, item) => sum + item.evidence.length, 0)
-    const votes = archive.reduce((sum, item) => sum + totalVotes(item.votes), 0)
-    const bullWins = archive.filter((item) => item.winnerLean === "Bull").length
-    const bearWins = archive.filter((item) => item.winnerLean === "Bear").length
-    const reputation = debates * 25 + evidence * 3 + votes * 5
-
-    return {
-      debates,
-      evidence,
-      votes,
-      bullWins,
-      bearWins,
-      reputation,
-    }
-  }, [archive])
-
-  return (
-    <aside className="border-y border-white/12 py-5">
-      <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[#ffee03]">
-        Reputation
-      </p>
-      <h3 className="mt-3 font-[family-name:var(--font-display)] text-3xl font-bold tracking-normal">
-        Analyst score
-      </h3>
-
-      <div className="mt-6 space-y-5">
-        <MetricRow label="Debates submitted" value={stats.debates} />
-        <MetricRow label="Evidence reviewed" value={stats.evidence} />
-        <MetricRow label="Community votes" value={stats.votes} />
-        <MetricRow label="Bull-leaning verdicts" value={stats.bullWins} />
-        <MetricRow label="Bear-leaning verdicts" value={stats.bearWins} />
-      </div>
-
-      <div className="mt-8 border-t border-white/10 pt-5">
-        <div className="text-sm text-white/55">Your reputation</div>
-        <div className="mt-2 font-[family-name:var(--font-display)] text-5xl font-bold text-[#ffee03]">
-          {stats.reputation}
-        </div>
-        <p className="mt-3 text-sm leading-relaxed text-white/55">
-          Reputation uses saved debates, inspected evidence, verdict history,
-          and community votes. Store: {storage}.
-        </p>
-      </div>
-
-      <div className="mt-8 border-t border-white/10 pt-5">
-        <div className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.18em] text-[#ffee03]">
-          <Database className="size-4" />
-          Asset vote history
-        </div>
-        <div className="space-y-3">
-          {assetVoteHistory.slice(0, 5).map((item) => {
-            const total = totalVotes(item.votes)
-
-            return (
-              <div key={item.symbol} className="border-l border-white/12 pl-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-semibold text-white">{item.symbol}</span>
-                  <span className="text-xs text-white/45">
-                    {item.debates} debates
-                  </span>
-                </div>
-                <div className="mt-1 text-xs text-white/55">
-                  Bull {votePercent(item.votes.bull, total)} · Bear{" "}
-                  {votePercent(item.votes.bear, total)} · Draw{" "}
-                  {votePercent(item.votes.draw, total)}
-                </div>
-              </div>
-            )
-          })}
-          {!assetVoteHistory.length ? (
-            <div className="text-sm text-white/55">No asset votes yet.</div>
-          ) : null}
-        </div>
-      </div>
-    </aside>
-  )
-}
-
-function MetricRow({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex items-center justify-between border-b border-white/10 pb-3">
-      <span className="text-sm text-white/55">{label}</span>
-      <span className="font-[family-name:var(--font-display)] text-2xl font-bold">
-        {value}
-      </span>
     </div>
   )
 }

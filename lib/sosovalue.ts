@@ -1,3 +1,4 @@
+import { get, put } from "@vercel/blob"
 import type { EvidencePoint } from "@/lib/types"
 import {
   compactNumber,
@@ -16,6 +17,11 @@ type SosoResponse<T> = {
   code: number
   message?: string
   data: T | null
+}
+
+type CachedSosoResponse = {
+  data: unknown
+  expiresAt: number
 }
 
 type CurrencyListItem = {
@@ -139,6 +145,118 @@ export class SosoConfigError extends Error {
   }
 }
 
+export class SosoRateLimitError extends Error {
+  retryAfter: number
+
+  constructor(message = "SoSoValue rate limit exceeded.", retryAfter = 60) {
+    super(message)
+    this.name = "SosoRateLimitError"
+    this.retryAfter = retryAfter
+  }
+}
+
+function sosoCachePath(cacheKey: string) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return null
+  }
+
+  const prefix =
+    (process.env.CRYPTODEBATE_STORE_PREFIX ?? "cryptodebate")
+      .replace(/^\/+|\/+$/g, "") || "cryptodebate"
+
+  return `${prefix}/sosovalue-cache/${stableId(cacheKey)}.json`
+}
+
+function sosoCacheTtl(path: string) {
+  if (path === "/currencies" || path === "/indices") {
+    return 60 * 60 * 1000
+  }
+
+  if (path.includes("/klines") || path.includes("/summary-history")) {
+    return 15 * 60 * 1000
+  }
+
+  return 5 * 60 * 1000
+}
+
+async function readSosoCache<T>(cacheKey: string, allowStale = false) {
+  const pathname = sosoCachePath(cacheKey)
+
+  if (!pathname) {
+    return null
+  }
+
+  try {
+    const blob = await get(pathname, {
+      access: "private",
+      useCache: false,
+    })
+
+    if (!blob || blob.statusCode !== 200) {
+      return null
+    }
+
+    const cached = (await new Response(blob.stream).json()) as CachedSosoResponse
+
+    if (
+      !cached ||
+      typeof cached !== "object" ||
+      typeof cached.expiresAt !== "number" ||
+      !("data" in cached)
+    ) {
+      return null
+    }
+
+    if (!allowStale && cached.expiresAt <= Date.now()) {
+      return null
+    }
+
+    return cached.data as T
+  } catch {
+    return null
+  }
+}
+
+async function writeSosoCache(cacheKey: string, data: unknown, ttlMs: number) {
+  const pathname = sosoCachePath(cacheKey)
+
+  if (!pathname) {
+    return
+  }
+
+  try {
+    await put(
+      pathname,
+      JSON.stringify({
+        data,
+        expiresAt: Date.now() + ttlMs,
+      } satisfies CachedSosoResponse),
+      {
+        access: "private",
+        addRandomSuffix: false,
+        allowOverwrite: true,
+        cacheControlMaxAge: 60,
+        contentType: "application/json",
+      },
+    )
+  } catch {
+    return
+  }
+}
+
+function retryAfterSeconds(response: Response) {
+  const value = Number(response.headers.get("retry-after") ?? "")
+
+  return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 60
+}
+
+function isRateLimit(response: Response, message: string | undefined) {
+  return (
+    response.status === 429 ||
+    /rate limit|too many requests/i.test(message ?? "")
+  )
+}
+
 async function sosoFetch<T>(
   path: string,
   params?: Record<string, string | number | undefined>,
@@ -157,6 +275,13 @@ async function sosoFetch<T>(
     }
   })
 
+  const cacheKey = url.toString()
+  const cached = await readSosoCache<T>(cacheKey)
+
+  if (cached) {
+    return cached
+  }
+
   const response = await fetch(url, {
     headers: {
       accept: "application/json",
@@ -170,10 +295,25 @@ async function sosoFetch<T>(
     | null
 
   if (!response.ok || !payload || payload.code !== 0) {
+    if (isRateLimit(response, payload?.message)) {
+      const stale = await readSosoCache<T>(cacheKey, true)
+
+      if (stale) {
+        return stale
+      }
+
+      throw new SosoRateLimitError(
+        payload?.message ?? "SoSoValue rate limit exceeded.",
+        retryAfterSeconds(response),
+      )
+    }
+
     throw new Error(
       payload?.message ?? `SoSoValue request failed: ${response.status}`,
     )
   }
+
+  await writeSosoCache(cacheKey, payload.data, sosoCacheTtl(path))
 
   return payload.data
 }

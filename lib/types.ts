@@ -154,7 +154,7 @@ export type SodexOrderIntent = {
     method: "POST"
     path: "/trade/orders/batch"
     body: {
-      accountID: string
+      accountID: string | null
       orders: Array<{
         clOrdID: string
         symbol: string
@@ -173,7 +173,7 @@ export type SodexOrderIntent = {
       name: "spot"
       version: "1"
       chainId: 138565 | 286623
-      verifyingContract: "0x0000000000000000000000000000000000000000"
+      verifyingContract: string | null
     }
     submitPath: "/trade/orders/batch"
     requiredHeaders: ["X-API-Sign", "X-API-Nonce"]

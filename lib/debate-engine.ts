@@ -5,6 +5,7 @@ import {
   generateOpenAiDebate,
   groundGeneratedDebate,
   OpenAiConfigError,
+  OpenAiRateLimitError,
 } from "@/lib/openai-debate"
 import { stableId } from "@/lib/server-utils"
 import type { DebateResult, DebateVotes, EvidencePoint } from "@/lib/types"
@@ -136,7 +137,9 @@ export async function runDebate(thesis: string, mode: "full" | "quick") {
     engine = "evidence-fallback"
     openAiStatus = error instanceof OpenAiConfigError ? "missing-key" : "error"
     notes.push(
-      error instanceof Error
+      error instanceof OpenAiRateLimitError
+        ? "AI generation used evidence fallback because OpenAI is rate-limited."
+        : error instanceof Error
         ? `AI generation used evidence fallback: ${error.message}`
         : "AI generation used evidence fallback.",
     )

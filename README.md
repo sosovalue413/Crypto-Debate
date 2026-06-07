@@ -28,8 +28,8 @@ CryptoDebate turns one thesis into a balanced research workflow. It forces both 
 - Shows clickable evidence cards with raw JSON and charts.
 - Supports full 3-round debates and Quick Verdict mode.
 - Lets the community vote: Bull Won, Bear Won, or Draw, with one anonymous ballot per browser voter per debate.
-- Saves debates and votes into a persistent server archive with Redis REST support and a local file fallback.
-- Exposes public debate, archive, and methodology pages.
+- Saves debates and votes into a persistent server archive with Redis REST, Vercel Blob, and local file fallback support.
+- Exposes public debate, archive, leaderboard, SoDEX readiness, and methodology pages.
 - Builds a shareable debate card.
 - Connects an injected wallet for signer context and creates an unsigned SoDEX order intent with the signed-write endpoint, EIP-712 signing scheme, required headers, and readiness checklist.
 
@@ -88,15 +88,23 @@ This makes the debate inspectable instead of just persuasive.
 
 ### Community Verdict
 
-Users vote on the debate result. Wave 2 stores votes server-side and uses one anonymous browser ballot per debate, so changing a vote moves the tally instead of inflating it. The store uses Redis REST when configured and falls back to an ignored local file for development.
+Users vote on the debate result. Wave 2 stores votes server-side and uses one anonymous browser ballot per debate, so changing a vote moves the tally instead of inflating it. The store uses Redis REST when configured, Vercel Blob when `BLOB_READ_WRITE_TOKEN` is present, and an ignored local file for development.
 
 ### Archive And Search
 
-Generated debates are saved in the server archive and mirrored locally for fast reloads. Users can search by thesis, token, or outcome. Public debate pages and the dynamic archive page turn debates into shareable research memory.
+Generated debates are saved in the server archive and mirrored locally in the browser for fast reloads. In production, each debate is also written to its own private Blob object so public share pages can read the debate directly instead of depending only on the aggregate archive index. Users can search the public archive by thesis, token, winner, or grounding status. Public debate pages and the dynamic archive page turn debates into shareable research memory.
+
+### Leaderboard
+
+The leaderboard page summarizes product quality and community signal:
+
+- analyst reputation score from debate count, evidence count, votes, verified grounding, and tracked outcomes
+- top debates ranked by confidence, evidence, votes, and grounding quality
+- asset leaderboard showing community lean and vote share by token
 
 ### SoDEX Action Intent
 
-After a debate, the app surfaces a matching SoDEX public market, can connect an injected wallet for signer context, and builds an unsigned order intent. The intent includes the spot batch order path, EIP-712 signing scheme, required signed-write headers, risk context from the debate, and the missing steps before submission. Signed execution is intentionally not submitted without wallet/API signing credentials and user confirmation.
+After a debate, the app surfaces a matching SoDEX public market, can connect an injected wallet for signer context, and builds an unsigned order intent. The intent includes the spot batch order path, EIP-712 signing scheme, required signed-write headers, risk context from the debate, and the missing steps before submission. Signed execution is intentionally not submitted without account ID, symbol precision rules, a configured verifying contract, wallet/API signing credentials, and explicit user confirmation.
 
 ## Tech Stack
 
@@ -119,21 +127,26 @@ app/
   api/archive       server archive and asset vote history route
   api/debate        debate generation route
   api/featured      daily topic route from SoSoValue hot news
+  api/health        safe production health/config check
   api/sodex         public SoDEX market route
   api/sodex/intent  unsigned SoDEX order intent route
   api/vote          persistent anonymous ballot route
   archive           public archive and asset vote history page
   debate/[id]       public debate page
+  leaderboard       analyst score and asset leaderboard page
   methodology       public grounding architecture page
+  sodex             public SoDEX market and signed-write readiness page
 components/
   hero-section.tsx  full application UI
+  site-nav.tsx      shared public page navigation
 lib/
   sosovalue.ts      SoSoValue client and evidence builder
   sodex.ts          SoDEX public market client
   sodex-intent.ts   SoDEX signed-write readiness builder
   openai-debate.ts  OpenAI debate generator and fallback
-  debate-store.ts   Redis/file archive, ballot, and vote history store
+  debate-store.ts   Redis/Blob/file archive, ballot, and vote history store
   debate-engine.ts  orchestration layer
+  leaderboard.ts    analyst score and leaderboard aggregations
 ```
 
 ## Environment Variables
@@ -144,10 +157,15 @@ Create `.env.local` for local development:
 SOSOVALUE_API_KEY=your_sosovalue_api_key
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-5.4-mini
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
 SODEX_SPOT_ENDPOINT=https://testnet-gw.sodex.dev/api/v1/spot
+BLOB_READ_WRITE_TOKEN=
 UPSTASH_REDIS_REST_URL=
 UPSTASH_REDIS_REST_TOKEN=
 CRYPTODEBATE_STORE_PREFIX=cryptodebate
+CRYPTODEBATE_FILE_STORE_NAME=cryptodebate-store.json
+SODEX_ACCOUNT_ID=
+SODEX_EIP712_VERIFYING_CONTRACT=
 ```
 
 Required:
@@ -158,14 +176,18 @@ Required:
 Optional:
 
 - `OPENAI_MODEL`
+- `NEXT_PUBLIC_SITE_URL`
 - `SODEX_SPOT_ENDPOINT`
 - `SOSOVALUE_BASE_URL`
+- `BLOB_READ_WRITE_TOKEN`
 - `UPSTASH_REDIS_REST_URL`
 - `UPSTASH_REDIS_REST_TOKEN`
 - `KV_REST_API_URL`
 - `KV_REST_API_TOKEN`
 - `CRYPTODEBATE_STORE_PREFIX`
 - `CRYPTODEBATE_FILE_STORE_NAME`
+- `SODEX_ACCOUNT_ID`
+- `SODEX_EIP712_VERIFYING_CONTRACT`
 
 Never place real keys in source code. `.env*` files are ignored by git.
 
@@ -204,9 +226,14 @@ The project is ready for Vercel. Required production environment variables for t
 - `SOSOVALUE_API_KEY`
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
+- `NEXT_PUBLIC_SITE_URL`
 - `SODEX_SPOT_ENDPOINT`
-- `UPSTASH_REDIS_REST_URL` or `KV_REST_API_URL`
-- `UPSTASH_REDIS_REST_TOKEN` or `KV_REST_API_TOKEN`
+- `BLOB_READ_WRITE_TOKEN`, `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`, or `KV_REST_API_URL`/`KV_REST_API_TOKEN` for durable production persistence
+
+Optional SoDEX signed-write readiness variables:
+
+- `SODEX_ACCOUNT_ID`
+- `SODEX_EIP712_VERIFYING_CONTRACT`
 
 Deploy with the Vercel CLI:
 
@@ -217,9 +244,19 @@ vercel --prod
 
 Or import the project in the Vercel dashboard and set the same environment variables before the production deployment.
 
-## Wave Roadmap
+Production health check:
 
-### Wave 1: Working Prototype
+```txt
+/api/health
+```
+
+The health route reports whether required keys are configured, which persistence backend is active, whether archive reads work, and whether SoDEX public markets are live. It returns booleans and counts only; it never returns secret values.
+
+When `BLOB_READ_WRITE_TOKEN` is configured, the app also caches SoSoValue GET responses in private Blob storage. Live SoSoValue data is still requested first when cache entries expire, but cached responses reduce repeated provider calls during demos and allow stale cached evidence to be used if SoSoValue temporarily rate-limits a request.
+
+## Wave Delivery
+
+### Wave 1: Prototype Completed
 
 - Live thesis input
 - Bull and Bear AI debate
@@ -231,13 +268,17 @@ Or import the project in the Vercel dashboard and set the same environment varia
 - SoDEX public market context and unsigned order intent
 - Vercel deployment
 
-### Wave 2: Full Product
+### Wave 2: Product Completed
 
 - Persistent database-backed debates and community ballots
+- Vercel Blob production persistence with per-debate direct records for faster public-page reads
+- Private Blob cache for SoSoValue GET responses to reduce provider rate-limit pressure
 - One anonymous vote per browser voter per debate
 - Per-asset vote history for longitudinal sentiment
 - Public debate pages with Open Graph metadata
 - Public archive/trending feed
+- Dedicated leaderboard page for analyst score and asset signal
+- Dedicated SoDEX readiness page with live public markets and signed-write gates
 - Public methodology page documenting the evidence-grounding architecture
 - SoSoValue Indexes integration for constituents, returns, and klines
 - Decision brief with assumptions, invalidation signals, metrics, and evidence gaps
@@ -245,16 +286,21 @@ Or import the project in the Vercel dashboard and set the same environment varia
 - SoDEX signed-write readiness flow with EIP-712 metadata and required headers
 - Injected wallet connection for signer context
 - Analyst score and asset leaderboard in the product UI
+- Separate public pages for archive, leaderboard, SoDEX readiness, methodology, and individual debates
+- Production health route that reports config/storage/readiness without exposing secrets
+- Robots, sitemap, canonical metadata, Open Graph, and Twitter metadata
+- Vercel production deployment at `https://cryptodebate.vercel.app`
+- Hardcoded credential and placeholder cleanup: secrets stay in environment variables, and incomplete SoDEX signing fields return `null` plus a readiness checklist
 
-### Wave 3: Production Launch
+### Future Wave 3 Improvements
 
-- SoDEX mainnet execution with wallet signing
-- Prediction tracking over time
-- Mobile PWA
-- API for embedding CryptoDebate in other apps
-- Premium debate rooms
-- Security review and abuse protection
-- Full analytics and retention loops
+- Signed SoDEX order submission after account ID, symbol precision, verifying contract, wallet signature, API nonce, and user confirmation are fully configured
+- Automated outcome tracking jobs that update 7D, 30D, and 90D checkpoints
+- Stronger abuse protection with durable rate limits, bot filtering, and moderation controls
+- Mobile PWA install flow and offline-friendly saved debate views
+- Embeddable API/widgets for partner apps
+- Analytics dashboards for retention, debate quality, grounding repair rates, and conversion from research to action
+- Security review before enabling real execution flows
 
 ## Hackathon Demo Script
 

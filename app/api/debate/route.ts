@@ -3,7 +3,7 @@ import { runDebate } from "@/lib/debate-engine"
 import { saveDebate } from "@/lib/debate-store"
 import { toPublicDebate } from "@/lib/public-debate"
 import { checkRateLimit, rateLimitHeaders } from "@/lib/rate-limit"
-import { SosoConfigError } from "@/lib/sosovalue"
+import { SosoConfigError, SosoRateLimitError } from "@/lib/sosovalue"
 
 export const runtime = "nodejs"
 
@@ -61,6 +61,24 @@ export async function POST(request: Request) {
           code: "MISSING_SOSOVALUE_API_KEY",
         },
         { status: 500 },
+      )
+    }
+
+    if (error instanceof SosoRateLimitError) {
+      return NextResponse.json(
+        {
+          error:
+            "SoSoValue is rate-limited right now. Please retry shortly; cached evidence will be used automatically when available.",
+          code: "SOSOVALUE_RATE_LIMIT",
+          provider: "sosovalue",
+          retryAfter: error.retryAfter,
+        },
+        {
+          status: 429,
+          headers: {
+            "retry-after": String(error.retryAfter),
+          },
+        },
       )
     }
 

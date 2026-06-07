@@ -1,4 +1,4 @@
-import { get, put } from "@vercel/blob"
+import { get, list, put } from "@vercel/blob"
 import { mkdir, readFile, writeFile } from "fs/promises"
 import path from "path"
 import type {
@@ -48,14 +48,27 @@ function blobConfig() {
     return null
   }
 
-  const prefix = process.env.CRYPTODEBATE_STORE_PREFIX ?? "cryptodebate"
+  const prefix =
+    (process.env.CRYPTODEBATE_STORE_PREFIX ?? "cryptodebate")
+      .replace(/^\/+|\/+$/g, "") || "cryptodebate"
   const fileName = path.basename(
     process.env.CRYPTODEBATE_FILE_STORE_NAME ?? "cryptodebate-store.json",
   )
 
   return {
+    debatePrefix: `${prefix}/debates`,
     pathname: `${prefix}/${fileName}`,
   }
+}
+
+function debateBlobPathname(debateId: string) {
+  const config = blobConfig()
+
+  if (!config || !/^[a-f0-9]{16}$/i.test(debateId)) {
+    return null
+  }
+
+  return `${config.debatePrefix}/${debateId}.json`
 }
 
 function storePath() {
@@ -245,6 +258,7 @@ async function readBlobState(): Promise<StoredState> {
   try {
     const blob = await get(config.pathname, {
       access: "private",
+      useCache: false,
     })
 
     if (!blob || blob.statusCode !== 200) {
@@ -266,6 +280,75 @@ async function readBlobState(): Promise<StoredState> {
     }
   } catch {
     return memoryState
+  }
+}
+
+async function readBlobDebate(debateId: string) {
+  const pathname = debateBlobPathname(debateId)
+
+  if (!pathname) {
+    return null
+  }
+
+  try {
+    const blob = await get(pathname, {
+      access: "private",
+      useCache: false,
+    })
+
+    if (!blob || blob.statusCode !== 200) {
+      return null
+    }
+
+    return normalizeDebate(await new Response(blob.stream).json())
+  } catch {
+    return null
+  }
+}
+
+async function writeBlobDebate(debate: DebateResult) {
+  const pathname = debateBlobPathname(debate.id)
+
+  if (!pathname) {
+    return
+  }
+
+  await put(pathname, JSON.stringify(debate), {
+    access: "private",
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    cacheControlMaxAge: 60,
+    contentType: "application/json",
+  })
+}
+
+async function listBlobDebates(limit: number) {
+  const config = blobConfig()
+
+  if (!config) {
+    return []
+  }
+
+  try {
+    const result = await list({
+      limit: Math.max(limit, 100),
+      prefix: `${config.debatePrefix}/`,
+    })
+    const newest = result.blobs
+      .filter((blob) => blob.pathname.endsWith(".json"))
+      .sort(
+        (a, b) =>
+          new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime(),
+      )
+      .slice(0, limit)
+
+    const debates = await Promise.all(
+      newest.map((blob) => readBlobDebate(path.basename(blob.pathname, ".json"))),
+    )
+
+    return debates.filter((debate): debate is DebateResult => Boolean(debate))
+  } catch {
+    return []
   }
 }
 
@@ -335,6 +418,7 @@ export async function saveDebate(result: DebateResult) {
     const state = await readBlobState()
 
     state.debates[debate.id] = debate
+    await writeBlobDebate(debate)
     await writeBlobState(state)
 
     return debate
@@ -363,6 +447,12 @@ export async function getDebate(debateId: string) {
   }
 
   if (blobConfig()) {
+    const directDebate = await readBlobDebate(debateId)
+
+    if (directDebate) {
+      return directDebate
+    }
+
     const state = await readBlobState()
 
     return normalizeDebate(state.debates[debateId])
@@ -408,11 +498,25 @@ export async function listDebates(limit = 50) {
   }
 
   if (blobConfig()) {
-    const state = await readBlobState()
+    const [state, directDebates] = await Promise.all([
+      readBlobState(),
+      listBlobDebates(limit),
+    ])
+    const debates = new Map<string, DebateResult>()
 
-    return Object.values(state.debates)
-      .map(normalizeDebate)
-      .filter((debate): debate is DebateResult => Boolean(debate))
+    for (const debate of Object.values(state.debates)) {
+      const normalized = normalizeDebate(debate)
+
+      if (normalized) {
+        debates.set(normalized.id, normalized)
+      }
+    }
+
+    for (const debate of directDebates) {
+      debates.set(debate.id, debate)
+    }
+
+    return Array.from(debates.values())
       .sort(
         (a, b) =>
           Date.parse(b.generatedAt) - Date.parse(a.generatedAt),
@@ -518,6 +622,7 @@ export async function castVote(input: {
 
     state.debates[debateId] = mergeDebateVotes(debate, votes)
     state.ballots[debateId] = debateBallots
+    await writeBlobDebate(state.debates[debateId])
     await writeBlobState(state)
 
     return {

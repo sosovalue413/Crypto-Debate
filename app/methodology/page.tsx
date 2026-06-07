@@ -1,4 +1,20 @@
-import Link from "next/link"
+import type { Metadata } from "next"
+import { SiteNav } from "@/components/site-nav"
+
+export const metadata: Metadata = {
+  title: "Methodology",
+  description:
+    "How CryptoDebate grounds AI arguments in SoSoValue evidence, SoSoValue Indexes, SoDEX data, and post-generation citation audits.",
+  alternates: {
+    canonical: "/methodology",
+  },
+  openGraph: {
+    title: "CryptoDebate Methodology",
+    description:
+      "Review the evidence pipeline, grounding guards, and live data sources behind every debate.",
+    url: "/methodology",
+  },
+}
 
 const pipeline = [
   "Resolve thesis assets through the SoSoValue currency list.",
@@ -20,14 +36,7 @@ export default function MethodologyPage() {
   return (
     <main className="min-h-screen bg-[#05070b] px-6 py-10 text-white md:px-10">
       <div className="mx-auto max-w-5xl">
-        <nav className="mb-10 flex items-center justify-between text-sm">
-          <Link href="/" className="font-semibold text-[#ffee03]">
-            CryptoDebate
-          </Link>
-          <Link href="/archive" className="text-white/60 hover:text-white">
-            Archive
-          </Link>
-        </nav>
+        <SiteNav active="/methodology" />
 
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[#ffee03]">
           Grounding method

@@ -37,6 +37,22 @@ export class OpenAiConfigError extends Error {
   }
 }
 
+export class OpenAiRateLimitError extends Error {
+  retryAfter: number
+
+  constructor(message = "OpenAI rate limit exceeded.", retryAfter = 60) {
+    super(message)
+    this.name = "OpenAiRateLimitError"
+    this.retryAfter = retryAfter
+  }
+}
+
+function retryAfterSeconds(response: Response) {
+  const value = Number(response.headers.get("retry-after") ?? "")
+
+  return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 60
+}
+
 function outputText(payload: Record<string, unknown>) {
   const chunks: string[] = []
   const output = Array.isArray(payload.output) ? payload.output : []
@@ -541,6 +557,11 @@ export async function generateOpenAiDebate(input: {
       payload && typeof payload.error === "object"
         ? JSON.stringify(payload.error)
         : `OpenAI request failed: ${response.status}`
+
+    if (response.status === 429 || /rate limit|too many requests/i.test(message)) {
+      throw new OpenAiRateLimitError(message, retryAfterSeconds(response))
+    }
+
     throw new Error(message)
   }
 

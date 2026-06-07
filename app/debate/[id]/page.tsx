@@ -1,6 +1,6 @@
 import type { Metadata } from "next"
-import Link from "next/link"
 import { notFound } from "next/navigation"
+import { SiteNav } from "@/components/site-nav"
 import { getDebate } from "@/lib/debate-store"
 
 export const runtime = "nodejs"
@@ -59,14 +59,7 @@ export default async function DebatePage({ params }: DebatePageProps) {
   return (
     <main className="min-h-screen bg-[#05070b] px-6 py-10 text-white md:px-10">
       <div className="mx-auto max-w-6xl">
-        <nav className="mb-10 flex items-center justify-between text-sm">
-          <Link href="/" className="font-semibold text-[#ffee03]">
-            CryptoDebate
-          </Link>
-          <Link href="/archive" className="text-white/60 hover:text-white">
-            Archive
-          </Link>
-        </nav>
+        <SiteNav />
 
         <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[#ffee03]">
           Public debate

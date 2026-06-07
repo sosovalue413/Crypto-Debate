@@ -4,6 +4,7 @@ import { Geist, Geist_Mono, Space_Grotesk } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import './globals.css'
 import { Nabla } from 'next/font/google'
+import { SITE_DESCRIPTION, SITE_NAME, SITE_URL } from "@/lib/site"
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-geist-sans" });
 const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
@@ -15,9 +16,29 @@ const spaceGrotesk = Space_Grotesk({
 const nabla = Nabla({ subsets: ["latin"], variable: "--font-nabla" });
 
 export const metadata: Metadata = {
-  title: 'CryptoDebate',
-  description: 'AI bull and bear agents debate crypto theses with live SoSoValue, SoSoValue Indexes, grounding audits, outcome tracking, and SoDEX market context.',
-  generator: 'CryptoDebate',
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: SITE_NAME,
+    template: `%s · ${SITE_NAME}`,
+  },
+  description: SITE_DESCRIPTION,
+  generator: SITE_NAME,
+  applicationName: SITE_NAME,
+  alternates: {
+    canonical: "/",
+  },
+  openGraph: {
+    title: SITE_NAME,
+    description: SITE_DESCRIPTION,
+    url: "/",
+    siteName: SITE_NAME,
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: SITE_NAME,
+    description: SITE_DESCRIPTION,
+  },
   icons: {
     icon: [
       {
