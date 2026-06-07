@@ -104,7 +104,7 @@ The leaderboard page summarizes product quality and community signal:
 
 ### SoDEX Action Intent
 
-After a debate, the app surfaces a matching SoDEX public market, can connect an injected wallet for signer context, and builds an unsigned order intent. The intent includes the spot batch order path, EIP-712 signing scheme, required signed-write headers, risk context from the debate, and the missing steps before submission. Signed execution is intentionally not submitted without account ID, symbol precision rules, a configured verifying contract, wallet/API signing credentials, and explicit user confirmation.
+After a debate, the app surfaces a matching SoDEX public market, can connect an injected wallet for signer context, and builds an unsigned order intent. The intent resolves live SoDEX spot symbol rules from `/markets/symbols`, includes the schema-level `symbolID`, integer enum values for side/type/time-in-force, the spot batch order path, EIP-712 signing scheme, required signed-write headers, risk context from the debate, and the missing steps before submission. Signed execution is intentionally not submitted without account ID, validated precision/notional rules, a configured verifying contract, wallet/API signing credentials, and explicit user confirmation.
 
 ## Tech Stack
 
@@ -284,6 +284,7 @@ When `BLOB_READ_WRITE_TOKEN` is configured, the app also caches SoSoValue GET re
 - Decision brief with assumptions, invalidation signals, metrics, and evidence gaps
 - Outcome baseline with 7D, 30D, and 90D checkpoints
 - SoDEX signed-write readiness flow with EIP-712 metadata and required headers
+- Live SoDEX `symbolID` and spot trading-rule resolution for schema-accurate unsigned order previews
 - Injected wallet connection for signer context
 - Analyst score and asset leaderboard in the product UI
 - Separate public pages for archive, leaderboard, SoDEX readiness, methodology, and individual debates

@@ -119,9 +119,21 @@ export type DebateResult = {
 
 export type SodexMarket = {
   symbol: string
+  symbolID?: number
+  displayName?: string
   lastPrice?: string
   priceChangePercent?: string
   quoteVolume?: string
+  tradingRules?: {
+    status?: string
+    pricePrecision?: number
+    quantityPrecision?: number
+    quoteCoinPrecision?: number
+    tickSize?: string
+    stepSize?: string
+    marketMinQuantity?: string
+    minNotional?: string
+  }
   raw: unknown
 }
 
@@ -137,6 +149,8 @@ export type SodexOrderIntent = {
   walletAddress?: string
   sourceDebateId?: string
   clientOrderId: string
+  symbolID: number | null
+  tradingRules?: SodexMarket["tradingRules"]
   riskContext?: {
     winnerLean?: DebateResult["winnerLean"]
     confidenceScore?: number
@@ -146,6 +160,7 @@ export type SodexOrderIntent = {
     type: "MARKET"
     timeInForce: "IOC"
     symbol: string
+    symbolID: number | null
     side: "BUY" | "SELL"
     funds?: string
     quantity?: string
@@ -154,13 +169,13 @@ export type SodexOrderIntent = {
     method: "POST"
     path: "/trade/orders/batch"
     body: {
-      accountID: string | null
+      accountID: number | null
       orders: Array<{
         clOrdID: string
-        symbol: string
-        side: "BUY" | "SELL"
-        type: "MARKET"
-        timeInForce: "IOC"
+        symbolID: number | null
+        side: 1 | 2
+        type: 2
+        timeInForce: 3
         funds?: string
         quantity?: string
       }>

@@ -34,7 +34,7 @@ export async function POST(request: Request) {
       walletAddress?: string
     }
     const debate = body.debateId ? await getDebate(body.debateId) : undefined
-    const intent = buildSodexOrderIntent({
+    const intent = await buildSodexOrderIntent({
       symbol: body.symbol ?? "",
       side: body.side === "sell" ? "sell" : "buy",
       amount: Number(body.amount),
