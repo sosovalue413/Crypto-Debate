@@ -2,6 +2,7 @@ import type { EvidencePoint } from "@/lib/types"
 import {
   compactNumber,
   percent,
+  ratioPercent,
   safeArray,
   stableId,
   stripHtml,
@@ -14,7 +15,7 @@ const SOSO_BASE_URL =
 type SosoResponse<T> = {
   code: number
   message?: string
-  data: T
+  data: T | null
 }
 
 type CurrencyListItem = {
@@ -41,6 +42,27 @@ type Kline = {
   volume?: number | string
 }
 
+type IndexSnapshot = {
+  price?: number | string
+  "24h_change_pct"?: number | string
+  "7day_roi"?: number | string
+  "1month_roi"?: number | string
+  "3month_roi"?: number | string
+  "1year_roi"?: number | string
+  ytd?: number | string
+}
+
+type IndexConstituent = {
+  currency_id: string
+  symbol: string
+  weight: number | string
+}
+
+type IndexKline = {
+  timestamp: number
+  close: number | string
+}
+
 type EtfSummary = {
   date: string
   total_net_inflow?: number | string
@@ -65,6 +87,11 @@ type NewsItem = {
 
 let currenciesCache: {
   value: CurrencyListItem[]
+  expiresAt: number
+} | null = null
+
+let indicesCache: {
+  value: string[]
   expiresAt: number
 } | null = null
 
@@ -156,9 +183,28 @@ async function getCurrencies() {
     return currenciesCache.value
   }
 
-  const value = await sosoFetch<CurrencyListItem[]>("/currencies")
+  const value = safeArray<CurrencyListItem>(
+    await sosoFetch<CurrencyListItem[]>("/currencies"),
+  )
 
   currenciesCache = {
+    value,
+    expiresAt: Date.now() + 60 * 60 * 1000,
+  }
+
+  return value
+}
+
+async function getIndices() {
+  if (indicesCache && indicesCache.expiresAt > Date.now()) {
+    return indicesCache.value
+  }
+
+  const value = safeArray<string>(await sosoFetch<unknown>("/indices"))
+    .map((ticker) => ticker.toLowerCase())
+    .filter(Boolean)
+
+  indicesCache = {
     value,
     expiresAt: Date.now() + 60 * 60 * 1000,
   }
@@ -208,9 +254,10 @@ export async function resolveAssets(thesis: string) {
 }
 
 async function marketEvidence(asset: CurrencyListItem): Promise<EvidencePoint[]> {
-  const snapshot = await sosoFetch<MarketSnapshot>(
-    `/currencies/${asset.currency_id}/market-snapshot`,
-  )
+  const snapshot =
+    (await sosoFetch<MarketSnapshot>(
+      `/currencies/${asset.currency_id}/market-snapshot`,
+    )) ?? {}
   const change = Number(snapshot.change_pct_24h)
   const price = compactNumber(snapshot.price, true)
   const marketcap = compactNumber(snapshot.marketcap, true)
@@ -344,6 +391,136 @@ async function etfEvidence(symbol: string): Promise<EvidencePoint[]> {
   ]
 }
 
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)))
+}
+
+async function indexEvidenceForTicker(ticker: string): Promise<EvidencePoint[]> {
+  const end = Date.now()
+  const start = end - 31 * 24 * 60 * 60 * 1000
+  const [snapshotData, constituents, klines] = await Promise.all([
+    sosoFetch<IndexSnapshot>(`/indices/${ticker}/market-snapshot`),
+    sosoFetch<IndexConstituent[]>(`/indices/${ticker}/constituents`),
+    sosoFetch<IndexKline[]>(`/indices/${ticker}/klines`, {
+      interval: "1d",
+      start_time: start,
+      end_time: end,
+      limit: 31,
+    }),
+  ])
+  const snapshot = snapshotData ?? {}
+  const rows = safeArray<IndexConstituent>(constituents)
+  const topConstituents = rows
+    .slice()
+    .sort((a, b) => Number(b.weight) - Number(a.weight))
+    .slice(0, 4)
+    .map((item) => `${item.symbol.toUpperCase()} ${ratioPercent(item.weight)}`)
+  const oneMonthRoi = Number(snapshot["1month_roi"])
+  const series = safeArray<IndexKline>(klines)
+    .map((item) => ({
+      label: new Date(Number(item.timestamp)).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+      }),
+      value: Number(item.close),
+    }))
+    .filter((item) => Number.isFinite(item.value))
+
+  return [
+    {
+      id: stableId(`index-${ticker}-${JSON.stringify(snapshot)}`),
+      kind: "index",
+      title: `${ticker.toUpperCase()} SoSoValue Index`,
+      summary: `SoSoValue Indexes shows ${ticker.toUpperCase()} near ${compactNumber(
+        snapshot.price,
+      )}, with ${ratioPercent(snapshot["24h_change_pct"])} 24h return and ${ratioPercent(
+        snapshot["1month_roi"],
+      )} 1M return. Top constituents: ${topConstituents.join(", ") || "n/a"}.`,
+      value: `${ratioPercent(snapshot["1month_roi"])} 1M / ${ratioPercent(
+        snapshot.ytd,
+      )} YTD`,
+      trend: oneMonthRoi > 0.03 ? "up" : oneMonthRoi < -0.03 ? "down" : "flat",
+      source: "SoSoValue Indexes",
+      sourceUrl: "https://ssi.sosovalue.com/en",
+      asOf: new Date().toISOString(),
+      symbol: ticker.toUpperCase(),
+      raw: {
+        snapshot,
+        constituents: rows,
+      },
+      series,
+    },
+  ]
+}
+
+async function indexEvidence(
+  thesis: string,
+  assetSymbols: string[],
+): Promise<EvidencePoint[]> {
+  const indices = await getIndices()
+
+  if (!indices.length) {
+    return []
+  }
+
+  const lowerThesis = thesis.toLowerCase()
+  const directMatches = indices.filter((ticker) => lowerThesis.includes(ticker))
+  const thematicMatches = indices.filter((ticker) => {
+    if (lowerThesis.includes("layer 1") || lowerThesis.includes(" l1 ")) {
+      return ticker.includes("layer1")
+    }
+
+    if (lowerThesis.includes("mag7") || lowerThesis.includes("magnificent")) {
+      return ticker.includes("mag7")
+    }
+
+    return false
+  })
+  const candidates = uniqueStrings([
+    ...directMatches,
+    ...thematicMatches,
+    ...indices.slice(0, 6),
+  ])
+  const assetSet = new Set(assetSymbols.map((symbol) => symbol.toUpperCase()))
+  const constituentResults = await Promise.allSettled(
+    candidates.map(async (ticker) => ({
+      ticker,
+      constituents: await sosoFetch<IndexConstituent[]>(
+        `/indices/${ticker}/constituents`,
+      ),
+    })),
+  )
+  const constituentMatches = constituentResults
+    .flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))
+    .filter((result) =>
+      safeArray<IndexConstituent>(result.constituents).some((item) =>
+        assetSet.has(item.symbol.toUpperCase()),
+      ),
+    )
+    .map((result) => result.ticker)
+
+  const chosen = uniqueStrings([
+    ...directMatches,
+    ...thematicMatches,
+    ...constituentMatches,
+    lowerThesis.includes("ssi") || lowerThesis.includes("index")
+      ? candidates[0]
+      : "",
+  ]).slice(0, 2)
+
+  if (!chosen.length) {
+    return []
+  }
+
+  const evidenceGroups = await Promise.allSettled(
+    chosen.map((ticker) => indexEvidenceForTicker(ticker)),
+  )
+
+  return evidenceGroups.flatMap((result) =>
+    result.status === "fulfilled" ? result.value : [],
+  )
+}
+
 async function newsEvidence(asset?: CurrencyListItem): Promise<EvidencePoint[]> {
   const data = asset
     ? await sosoFetch<{ list: NewsItem[] }>("/news", {
@@ -358,7 +535,7 @@ async function newsEvidence(asset?: CurrencyListItem): Promise<EvidencePoint[]> 
         language: "en",
       })
 
-  return safeArray<NewsItem>(data.list)
+  return safeArray<NewsItem>(data?.list)
     .slice(0, 3)
     .map((item) => {
       const title = item.title?.trim() || "Current crypto news"
@@ -387,9 +564,11 @@ async function newsEvidence(asset?: CurrencyListItem): Promise<EvidencePoint[]> 
 
 export async function collectSosoEvidence(thesis: string) {
   const assets = await resolveAssets(` ${thesis} `)
+  const assetSymbols = assets.map((asset) => asset.symbol)
   const evidenceGroups = await Promise.allSettled([
     ...assets.flatMap((asset) => [marketEvidence(asset), technicalEvidence(asset)]),
     ...assets.map((asset) => etfEvidence(asset.symbol)),
+    indexEvidence(thesis, assetSymbols),
     newsEvidence(assets[0]),
   ])
 
@@ -413,7 +592,7 @@ export async function getFeaturedSosoTopic() {
     page_size: 8,
     language: "en",
   })
-  const top = safeArray<NewsItem>(data.list)[0]
+  const top = safeArray<NewsItem>(data?.list)[0]
 
   if (!top) {
     return null

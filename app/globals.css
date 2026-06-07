@@ -124,4 +124,15 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  html,
+  body {
+    overflow-x: clip;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-bg {
+    display: none;
+  }
 }

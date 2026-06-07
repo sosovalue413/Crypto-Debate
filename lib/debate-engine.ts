@@ -3,15 +3,77 @@ import { collectSosoEvidence, SosoConfigError } from "@/lib/sosovalue"
 import {
   generateEvidenceFallback,
   generateOpenAiDebate,
+  groundGeneratedDebate,
   OpenAiConfigError,
 } from "@/lib/openai-debate"
 import { stableId } from "@/lib/server-utils"
-import type { DebateResult, DebateVotes } from "@/lib/types"
+import type { DebateResult, DebateVotes, EvidencePoint } from "@/lib/types"
 
 const emptyVotes: DebateVotes = {
   bull: 0,
   bear: 0,
   draw: 0,
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date)
+
+  next.setDate(next.getDate() + days)
+
+  return next.toISOString()
+}
+
+function buildOutcomeTracker(input: {
+  generatedAt: string
+  evidence: EvidencePoint[]
+  assetSymbols: string[]
+}): DebateResult["outcomeTracker"] {
+  const baselineEvidence = input.evidence
+    .filter((item) =>
+      ["market", "technical", "flow", "index", "dex"].includes(item.kind),
+    )
+    .slice(0, 5)
+  const baselineAt = input.generatedAt
+  const start = new Date(baselineAt)
+
+  if (!baselineEvidence.length) {
+    return {
+      status: "insufficient-data",
+      baselineAt,
+      baselineEvidenceIds: [],
+      trackedSymbols: input.assetSymbols,
+      checkpoints: [],
+      notes: ["Outcome tracking needs at least one market, flow, index, or SoDEX evidence card."],
+    }
+  }
+
+  return {
+    status: "tracking",
+    baselineAt,
+    baselineEvidenceIds: baselineEvidence.map((item) => item.id),
+    trackedSymbols: input.assetSymbols.length ? input.assetSymbols : ["Market-wide"],
+    checkpoints: [
+      {
+        label: "7D check",
+        dueAt: addDays(start, 7),
+        status: "pending",
+      },
+      {
+        label: "30D check",
+        dueAt: addDays(start, 30),
+        status: "pending",
+      },
+      {
+        label: "90D check",
+        dueAt: addDays(start, 90),
+        status: "pending",
+      },
+    ],
+    notes: [
+      "Baseline uses only live evidence collected for this debate.",
+      "Future checks compare the thesis against the same tracked symbols and evidence families.",
+    ],
+  }
 }
 
 export async function runDebate(thesis: string, mode: "full" | "quick") {
@@ -57,6 +119,8 @@ export async function runDebate(thesis: string, mode: "full" | "quick") {
     | "engine"
     | "evidence"
     | "votes"
+    | "grounding"
+    | "outcomeTracker"
     | "dataHealth"
   >
   let engine: DebateResult["engine"] = "openai"
@@ -84,7 +148,18 @@ export async function runDebate(thesis: string, mode: "full" | "quick") {
     })
   }
 
+  const grounded = groundGeneratedDebate(generated, {
+    thesis,
+    mode,
+    evidence,
+  })
+
   const generatedAt = new Date().toISOString()
+  const outcomeTracker = buildOutcomeTracker({
+    generatedAt,
+    evidence,
+    assetSymbols,
+  })
 
   return {
     id: stableId(`${thesis}-${generatedAt}-${mode}`),
@@ -94,12 +169,13 @@ export async function runDebate(thesis: string, mode: "full" | "quick") {
     engine,
     evidence,
     votes: { ...emptyVotes },
+    outcomeTracker,
     dataHealth: {
       sosoValue: sosoStatus,
       soDex: sodexStatus,
       openAi: openAiStatus,
       notes,
     },
-    ...generated,
+    ...grounded,
   } satisfies DebateResult
 }

@@ -25,6 +25,16 @@ export function percent(value: unknown) {
   return `${num > 0 ? "+" : ""}${num.toFixed(2)}%`
 }
 
+export function ratioPercent(value: unknown) {
+  const num = Number(value)
+
+  if (!Number.isFinite(num)) {
+    return "n/a"
+  }
+
+  return percent(num * 100)
+}
+
 export function stripHtml(value: string | undefined) {
   return (value ?? "")
     .replace(/<[^>]+>/g, " ")
@@ -46,4 +56,14 @@ export function toDateInput(date: Date) {
 
 export function safeArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : []
+}
+
+export function boundedInteger(value: unknown, fallback: number, max: number) {
+  const parsed = Number(value)
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback
+  }
+
+  return Math.min(Math.floor(parsed), max)
 }

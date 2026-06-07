@@ -1,11 +1,33 @@
 import { NextResponse } from "next/server"
 import { runDebate } from "@/lib/debate-engine"
+import { saveDebate } from "@/lib/debate-store"
+import { toPublicDebate } from "@/lib/public-debate"
+import { checkRateLimit, rateLimitHeaders } from "@/lib/rate-limit"
 import { SosoConfigError } from "@/lib/sosovalue"
 
 export const runtime = "nodejs"
 
 export async function POST(request: Request) {
   try {
+    const rateLimit = checkRateLimit(request, {
+      scope: "debate",
+      limit: 5,
+      windowMs: 10 * 60 * 1000,
+    })
+
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          error: "Too many debate requests. Please wait before trying again.",
+          retryAfter: rateLimit.retryAfter,
+        },
+        {
+          status: 429,
+          headers: rateLimitHeaders(rateLimit),
+        },
+      )
+    }
+
     const body = (await request.json()) as {
       thesis?: string
       mode?: "full" | "quick"
@@ -23,9 +45,14 @@ export async function POST(request: Request) {
       thesis.slice(0, 500),
       body.mode === "quick" ? "quick" : "full",
     )
+    const stored = await saveDebate(result)
 
-    return NextResponse.json(result)
+    return NextResponse.json(toPublicDebate(stored))
   } catch (error) {
+    if (error instanceof SyntaxError) {
+      return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 })
+    }
+
     if (error instanceof SosoConfigError) {
       return NextResponse.json(
         {

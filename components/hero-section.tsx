@@ -7,6 +7,7 @@ import {
   BrainCircuit,
   Check,
   Clipboard,
+  Database,
   ExternalLink,
   Gavel,
   Loader2,
@@ -40,11 +41,13 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type {
+  AssetVoteHistory,
   DebateResult,
   DebateSide,
   DebateVotes,
   EvidencePoint,
   SodexMarket,
+  SodexOrderIntent,
 } from "@/lib/types"
 
 const examples = [
@@ -73,11 +76,51 @@ type SodexState = {
   status: "live" | "error"
 }
 
+type ArchivePayload = {
+  archive: DebateResult[]
+  assetVotes: AssetVoteHistory[]
+  storage: "redis" | "file"
+}
+
+type Eip1193Provider = {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
+}
+
+function createLocalId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID().replace(/-/g, "")
+  }
+
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`
+}
+
+function readBallots() {
+  try {
+    return JSON.parse(
+      window.localStorage.getItem("cryptodebate.ballots") ?? "{}",
+    ) as Record<string, DebateSide>
+  } catch {
+    return {}
+  }
+}
+
+function writeBallot(debateId: string, vote: DebateSide) {
+  const ballots = readBallots()
+
+  ballots[debateId] = vote
+  window.localStorage.setItem("cryptodebate.ballots", JSON.stringify(ballots))
+}
+
 export function HeroSection() {
   const [thesis, setThesis] = useState(examples[0])
   const [mode, setMode] = useState<"full" | "quick">("full")
   const [result, setResult] = useState<DebateResult | null>(null)
   const [archive, setArchive] = useState<DebateResult[]>([])
+  const [assetVoteHistory, setAssetVoteHistory] = useState<AssetVoteHistory[]>(
+    [],
+  )
+  const [storageBackend, setStorageBackend] =
+    useState<ArchivePayload["storage"]>("file")
   const [archiveQuery, setArchiveQuery] = useState("")
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(
     null,
@@ -88,11 +131,54 @@ export function HeroSection() {
   const [loadingStep, setLoadingStep] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [voterId, setVoterId] = useState<string | null>(null)
+  const [userVote, setUserVote] = useState<DebateSide | null>(null)
   const [intentAmount, setIntentAmount] = useState("100")
   const [intentSide, setIntentSide] = useState<"buy" | "sell">("buy")
-  const [intent, setIntent] = useState<string | null>(null)
+  const [intent, setIntent] = useState<SodexOrderIntent | null>(null)
+  const [intentLoading, setIntentLoading] = useState(false)
+  const [walletAddress, setWalletAddress] = useState<string | null>(null)
+
+  async function loadArchive() {
+    try {
+      const response = await fetch("/api/archive?limit=50")
+      const payload = (await response.json()) as ArchivePayload
+
+      setArchive(payload.archive ?? [])
+      setAssetVoteHistory(payload.assetVotes ?? [])
+      setStorageBackend(payload.storage ?? "file")
+
+      if (payload.archive?.length) {
+        window.localStorage.setItem(
+          "cryptodebate.archive",
+          JSON.stringify(payload.archive),
+        )
+      }
+    } catch {
+      setResult(result)
+      setUserVote(userVote)
+      return
+    }
+  }
 
   useEffect(() => {
+    const storedVoterId = window.localStorage.getItem("cryptodebate.voterId")
+
+    if (storedVoterId) {
+      setVoterId(storedVoterId)
+    } else {
+      const nextVoterId = createLocalId()
+
+      window.localStorage.setItem("cryptodebate.voterId", nextVoterId)
+      setVoterId(nextVoterId)
+    }
+
+    const storedWallet = window.localStorage.getItem("cryptodebate.wallet")
+
+    if (storedWallet) {
+      setWalletAddress(storedWallet)
+    }
+
     const stored = window.localStorage.getItem("cryptodebate.archive")
 
     if (stored) {
@@ -102,6 +188,8 @@ export function HeroSection() {
         setArchive([])
       }
     }
+
+    void loadArchive()
   }, [])
 
   useEffect(() => {
@@ -139,6 +227,7 @@ export function HeroSection() {
 
     setSelectedEvidenceId(result.evidence[0]?.id ?? null)
     setIntentSide(result.winnerLean === "Bear" ? "sell" : "buy")
+    setUserVote(readBallots()[result.id] ?? null)
 
     const nextArchive = [
       result,
@@ -223,6 +312,7 @@ export function HeroSection() {
       }
 
       setResult(payload as DebateResult)
+      void loadArchive()
       window.setTimeout(() => {
         document
           .getElementById("debate-floor")
@@ -240,16 +330,24 @@ export function HeroSection() {
   }
 
   async function submitVote(vote: DebateSide) {
-    if (!result) {
+    if (!result || !voterId) {
       return
     }
 
-    const optimistic = {
-      ...result.votes,
-      [vote]: result.votes[vote] + 1,
+    const previousVotes = result.votes
+    const previousUserVote = userVote
+    const optimistic = { ...result.votes }
+
+    if (userVote && userVote !== vote) {
+      optimistic[userVote] = Math.max(0, optimistic[userVote] - 1)
+      optimistic[vote] += 1
+    } else if (!userVote) {
+      optimistic[vote] += 1
     }
 
     setResult({ ...result, votes: optimistic })
+    setUserVote(vote)
+    setError(null)
 
     try {
       const response = await fetch("/api/vote", {
@@ -257,17 +355,64 @@ export function HeroSection() {
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({ debateId: result.id, vote }),
+        body: JSON.stringify({ debateId: result.id, vote, voterId }),
       })
-      const payload = (await response.json()) as { votes?: DebateVotes }
-
-      if (payload.votes) {
-        setResult((current) =>
-          current ? { ...current, votes: payload.votes as DebateVotes } : current,
-        )
+      const payload = (await response.json()) as {
+        votes?: DebateVotes
+        currentVote?: DebateSide
+        error?: string
       }
-    } catch {
-      return
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Vote was not saved.")
+      }
+
+      if (!payload.votes) {
+        throw new Error("Vote response did not include an updated tally.")
+      }
+
+      setResult((current) =>
+        current ? { ...current, votes: payload.votes as DebateVotes } : current,
+      )
+      writeBallot(result.id, payload.currentVote ?? vote)
+      setUserVote(payload.currentVote ?? vote)
+      setArchive((current) =>
+        current.map((item) =>
+          item.id === result.id
+            ? { ...item, votes: payload.votes as DebateVotes }
+            : item,
+        ),
+      )
+
+      const archivePayload = payload as {
+        assetVotes?: AssetVoteHistory[]
+        storage?: ArchivePayload["storage"]
+      }
+
+      if (archivePayload.assetVotes) {
+        setAssetVoteHistory(archivePayload.assetVotes)
+      }
+
+      if (archivePayload.storage) {
+        setStorageBackend(archivePayload.storage)
+      }
+    } catch (voteError) {
+      setResult((current) =>
+        current && current.id === result.id
+          ? { ...current, votes: previousVotes }
+          : current,
+      )
+      setUserVote(previousUserVote)
+      setArchive((current) =>
+        current.map((item) =>
+          item.id === result.id ? { ...item, votes: previousVotes } : item,
+        ),
+      )
+      setError(
+        voteError instanceof Error
+          ? voteError.message
+          : "Vote was not saved.",
+      )
     }
   }
 
@@ -285,6 +430,7 @@ export function HeroSection() {
         total,
       )} vs Draw ${votePercent(result.votes.draw, total)}`,
       `Verdict: ${result.quickVerdict.verdict}`,
+      `Public page: ${window.location.origin}/debate/${result.id}`,
       `Evidence: ${result.evidence
         .slice(0, 2)
         .map((item) => `${item.title} (${item.value})`)
@@ -296,25 +442,84 @@ export function HeroSection() {
     window.setTimeout(() => setCopied(false), 1600)
   }
 
-  function buildSodexIntent() {
+  async function connectWallet() {
+    const ethereum = (window as Window & { ethereum?: Eip1193Provider }).ethereum
+
+    if (!ethereum) {
+      setError("No injected wallet found. Install or unlock a wallet to connect.")
+      return
+    }
+
+    try {
+      const accounts = (await ethereum.request({
+        method: "eth_requestAccounts",
+      })) as string[]
+      const account = accounts[0]
+
+      if (!account) {
+        throw new Error("No wallet account returned.")
+      }
+
+      setWalletAddress(account)
+      window.localStorage.setItem("cryptodebate.wallet", account)
+      setError(null)
+    } catch (walletError) {
+      setError(
+        walletError instanceof Error
+          ? walletError.message
+          : "Wallet connection failed.",
+      )
+    }
+  }
+
+  async function buildSodexIntent() {
     if (!selectedMarket) {
       return
     }
 
-    const payload = {
-      venue: "SoDEX testnet spot",
-      endpoint: sodex?.endpoint,
-      action: "unsignedOrderIntent",
-      symbol: selectedMarket.symbol,
-      side: intentSide,
-      quoteSizeUSDC: Number(intentAmount),
-      sourceDebateId: result?.id,
-      createdAt: new Date().toISOString(),
-      nextStep:
-        "Connect wallet or API signer, create EIP-712 signature, then submit to SoDEX signed write endpoint.",
+    const amount = Number(intentAmount)
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Enter a positive SoDEX order size.")
+      return
     }
 
-    setIntent(JSON.stringify(payload, null, 2))
+    setIntentLoading(true)
+    setError(null)
+
+    try {
+      const response = await fetch("/api/sodex/intent", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          debateId: result?.id,
+          symbol: selectedMarket.symbol,
+          side: intentSide,
+          amount,
+          walletAddress,
+        }),
+      })
+      const payload = (await response.json()) as {
+        intent?: SodexOrderIntent
+        error?: string
+      }
+
+      if (!response.ok || !payload.intent) {
+        throw new Error(payload.error ?? "Unable to build SoDEX intent.")
+      }
+
+      setIntent(payload.intent)
+    } catch (intentError) {
+      setError(
+        intentError instanceof Error
+          ? intentError.message
+          : "Unable to build SoDEX intent.",
+      )
+    } finally {
+      setIntentLoading(false)
+    }
   }
 
   return (
@@ -343,6 +548,12 @@ export function HeroSection() {
               >
                 Archive <ExternalLink className="size-3" />
               </a>
+              <a
+                href="/methodology"
+                className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Method <ExternalLink className="size-3" />
+              </a>
             </div>
 
             <div className="text-right">
@@ -350,7 +561,7 @@ export function HeroSection() {
                 CryptoDebate
               </div>
               <div className="text-xs uppercase tracking-[0.28em] text-[#ffee03]">
-                Wave 1
+                Wave 2
               </div>
             </div>
           </nav>
@@ -380,7 +591,7 @@ export function HeroSection() {
                     />
                     <StatusPill
                       label="SoDEX market data"
-                      state={sodex?.status ?? "live"}
+                      state={sodex?.status ?? "ready"}
                     />
                     <StatusPill
                       label="OpenAI debate"
@@ -512,6 +723,9 @@ export function HeroSection() {
                   <MetaPill icon={ShieldCheck}>
                     Confidence {result.confidenceScore}/100
                   </MetaPill>
+                  <MetaPill icon={ShieldCheck}>
+                    Grounding {result.grounding.status}
+                  </MetaPill>
                 </div>
               ) : null}
             </div>
@@ -520,6 +734,8 @@ export function HeroSection() {
               <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
                 <div className="space-y-8">
                   <QuickVerdictPanel result={result} />
+
+                  <DecisionBriefPanel result={result} />
 
                   <div className="space-y-8">
                     {result.rounds.map((round) => (
@@ -532,7 +748,13 @@ export function HeroSection() {
                     ))}
                   </div>
 
-                  <VotePanel votes={result.votes} onVote={submitVote} />
+                  <VotePanel
+                    votes={result.votes}
+                    userVote={userVote}
+                    onVote={submitVote}
+                  />
+
+                  <OutcomePanel result={result} />
                 </div>
 
                 <div id="evidence" className="space-y-8">
@@ -542,6 +764,8 @@ export function HeroSection() {
                     selectedId={selectedEvidenceId}
                     onSelect={setSelectedEvidenceId}
                   />
+
+                  <GroundingPanel result={result} />
 
                   <SharePanel
                     result={result}
@@ -555,8 +779,11 @@ export function HeroSection() {
                     amount={intentAmount}
                     side={intentSide}
                     intent={intent}
+                    intentLoading={intentLoading}
+                    walletAddress={walletAddress}
                     onAmount={setIntentAmount}
                     onSide={setIntentSide}
+                    onConnectWallet={connectWallet}
                     onBuild={buildSodexIntent}
                   />
                 </div>
@@ -591,6 +818,12 @@ export function HeroSection() {
                     placeholder="Search by token, thesis, or outcome"
                   />
                 </div>
+                <a
+                  href="/archive"
+                  className="inline-flex items-center gap-1 text-sm text-[#ffee03] hover:text-white"
+                >
+                  Open public archive <ExternalLink className="size-3" />
+                </a>
               </div>
 
               <div className="mt-8 divide-y divide-white/10 border-y border-white/10">
@@ -604,7 +837,7 @@ export function HeroSection() {
                           .getElementById("debate-floor")
                           ?.scrollIntoView({ behavior: "smooth" })
                       }}
-                      className="grid w-full gap-4 py-5 text-left transition hover:bg-white/[0.03] md:grid-cols-[1fr_160px_120px]"
+                      className="grid w-full gap-4 py-5 text-left transition hover:bg-white/[0.03] md:grid-cols-[1fr_160px_130px_120px]"
                     >
                       <div>
                         <div className="font-semibold text-white">{item.thesis}</div>
@@ -615,6 +848,9 @@ export function HeroSection() {
                       </div>
                       <div className="text-sm text-white/70">
                         {item.evidence.length} evidence cards
+                      </div>
+                      <div className="text-sm text-white/70">
+                        {totalVotes(item.votes)} votes
                       </div>
                       <div className="font-[family-name:var(--font-display)] text-lg font-bold text-[#ffee03]">
                         {item.winnerLean}
@@ -629,7 +865,11 @@ export function HeroSection() {
               </div>
             </div>
 
-            <Leaderboard archive={archive} />
+            <Leaderboard
+              archive={archive}
+              assetVoteHistory={assetVoteHistory}
+              storage={storageBackend}
+            />
           </div>
         </section>
       </main>
@@ -639,7 +879,7 @@ export function HeroSection() {
 
 function ShaderBackdrop() {
   return (
-    <div className="fixed inset-0 -z-10" aria-hidden="true">
+    <div className="motion-bg fixed inset-0 -z-10 opacity-70" aria-hidden="true">
       <Shader className="absolute inset-0">
         <RadialGradient
           center={{ x: 0.83, y: 0.2 }}
@@ -754,6 +994,99 @@ function QuickVerdictPanel({ result }: { result: DebateResult }) {
           tone="neutral"
           text={result.quickVerdict.verdict}
         />
+      </div>
+    </div>
+  )
+}
+
+function DecisionBriefPanel({ result }: { result: DebateResult }) {
+  return (
+    <div className="border-y border-white/12 py-5">
+      <div className="mb-5 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.18em] text-[#ffee03]">
+        <BrainCircuit className="size-4" />
+        Decision brief
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <BriefColumn
+          title="Strongest bull"
+          tone="bull"
+          text={result.decisionBrief.strongestBull}
+        />
+        <BriefColumn
+          title="Strongest bear"
+          tone="bear"
+          text={result.decisionBrief.strongestBear}
+        />
+      </div>
+
+      <div className="mt-5 grid gap-4 md:grid-cols-3">
+        <BriefList title="Assumptions" items={result.decisionBrief.keyAssumptions} />
+        <BriefList
+          title="Invalidation"
+          items={result.decisionBrief.invalidationSignals}
+        />
+        <BriefList
+          title="Watch next"
+          items={result.decisionBrief.nextMetricsToWatch}
+        />
+      </div>
+
+      {result.decisionBrief.evidenceGaps.length ? (
+        <div className="mt-5 border-l border-white/12 pl-4">
+          <div className="text-xs font-bold uppercase tracking-[0.18em] text-white/45">
+            Evidence gaps
+          </div>
+          <p className="mt-3 text-sm leading-relaxed text-white/62">
+            {result.decisionBrief.evidenceGaps[0]}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function BriefColumn({
+  title,
+  text,
+  tone,
+}: {
+  title: string
+  text: string
+  tone: "bull" | "bear"
+}) {
+  return (
+    <div
+      className={cn(
+        "min-h-32 border-l pl-4",
+        tone === "bull" ? "border-emerald-300" : "border-red-400",
+      )}
+    >
+      <div
+        className={cn(
+          "text-xs font-bold uppercase tracking-[0.18em]",
+          tone === "bull" ? "text-emerald-300" : "text-red-300",
+        )}
+      >
+        {title}
+      </div>
+      <p className="mt-3 text-sm leading-relaxed text-white/70">{text}</p>
+    </div>
+  )
+}
+
+function BriefList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="border-l border-white/12 pl-4">
+      <div className="text-xs font-bold uppercase tracking-[0.18em] text-white/45">
+        {title}
+      </div>
+      <div className="mt-3 space-y-2">
+        {items.slice(0, 4).map((item) => (
+          <div key={item} className="text-sm leading-relaxed text-white/62">
+            {item}
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -915,7 +1248,17 @@ function EvidencePanel({
           >
             <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="text-sm font-semibold text-white">{item.title}</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-sm font-semibold text-white">
+                    {item.title}
+                  </div>
+                  <span className="rounded-sm border border-white/10 px-1.5 py-0.5 text-[10px] uppercase tracking-normal text-white/45">
+                    {item.source}
+                  </span>
+                  <span className="rounded-sm border border-white/10 px-1.5 py-0.5 text-[10px] uppercase tracking-normal text-white/45">
+                    {item.kind}
+                  </span>
+                </div>
                 <div className="mt-1 text-xs text-white/55">{item.summary}</div>
               </div>
               <div className="shrink-0 text-right text-sm font-bold text-[#ffee03]">
@@ -931,15 +1274,19 @@ function EvidencePanel({
           <div className="flex items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-white">
-                Raw source: {selected.source}
+                Source payload: {selected.source}
               </div>
+              <p className="mt-1 text-xs text-white/45">
+                Public view shows a redacted payload shape; server evidence uses
+                the full provider response.
+              </p>
               <a
                 href={selected.sourceUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="mt-1 inline-flex items-center gap-1 text-xs text-[#ffee03] hover:text-white"
               >
-                Open source docs <ExternalLink className="size-3" />
+                Open source <ExternalLink className="size-3" />
               </a>
             </div>
             <span className="text-xs text-white/45">
@@ -954,6 +1301,60 @@ function EvidencePanel({
           </pre>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function GroundingPanel({ result }: { result: DebateResult }) {
+  return (
+    <div className="border-y border-white/12 py-5">
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#ffee03]">
+            Grounding audit
+          </p>
+          <h3 className="mt-2 font-[family-name:var(--font-display)] text-2xl font-bold">
+            {result.grounding.status}
+          </h3>
+        </div>
+        <ShieldCheck className="size-6 text-white/45" />
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-sm">
+        <MetricTile
+          label="Cited cards"
+          value={result.grounding.citedEvidenceIds.length}
+        />
+        <MetricTile
+          label="Repairs"
+          value={result.grounding.repairedSpeechCount}
+        />
+        <MetricTile
+          label="Blocked claims"
+          value={result.grounding.unsupportedClaimCount}
+        />
+      </div>
+
+      {result.grounding.notes.length ? (
+        <div className="mt-4 space-y-2">
+          {result.grounding.notes.slice(0, 3).map((note) => (
+            <div key={note} className="border-l border-white/14 pl-3 text-sm text-white/58">
+              {note}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function MetricTile({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-2">
+      <div className="text-xs text-white/45">{label}</div>
+      <div className="mt-1 font-[family-name:var(--font-display)] text-2xl font-bold text-[#ffee03]">
+        {value}
+      </div>
     </div>
   )
 }
@@ -994,9 +1395,11 @@ function EvidenceChart({ evidence }: { evidence: EvidencePoint }) {
 
 function VotePanel({
   votes,
+  userVote,
   onVote,
 }: {
   votes: DebateVotes
+  userVote: DebateSide | null
   onVote: (vote: DebateSide) => void
 }) {
   const total = totalVotes(votes)
@@ -1012,17 +1415,89 @@ function VotePanel({
           <button
             key={side}
             onClick={() => onVote(side)}
-            className="rounded-md border border-white/12 bg-white/[0.03] px-4 py-3 text-left transition hover:border-[#ffee03]/70"
+            className={cn(
+              "rounded-md border px-4 py-3 text-left transition hover:border-[#ffee03]/70",
+              userVote === side
+                ? "border-[#ffee03]/70 bg-[#ffee03]/10"
+                : "border-white/12 bg-white/[0.03]",
+            )}
           >
             <span className="block text-sm font-semibold capitalize text-white">
               {side === "draw" ? "Draw" : `${side} won`}
+              {userVote === side ? " · your vote" : ""}
             </span>
             <span className="mt-1 block text-2xl font-bold text-[#ffee03]">
               {votePercent(votes[side], total)}
             </span>
+            <span className="mt-1 block text-xs text-white/45">
+              {votes[side]} votes
+            </span>
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+function OutcomePanel({ result }: { result: DebateResult }) {
+  const baseline = result.outcomeTracker.baselineEvidenceIds
+    .map((id) => result.evidence.find((item) => item.id === id))
+    .filter(Boolean) as EvidencePoint[]
+
+  return (
+    <div className="border-y border-white/12 py-5">
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.18em] text-[#ffee03]">
+          <BarChart3 className="size-4" />
+          Outcome tracker
+        </div>
+        <span className="rounded-md border border-white/12 px-2.5 py-1 text-xs text-white/55">
+          {result.outcomeTracker.status}
+        </span>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-[1fr_1.1fr]">
+        <div>
+          <div className="text-xs uppercase tracking-[0.18em] text-white/45">
+            Baseline
+          </div>
+          <div className="mt-2 text-sm text-white/70">
+            {new Date(result.outcomeTracker.baselineAt).toLocaleString()}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {baseline.map((item) => (
+              <span
+                key={item.id}
+                className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-white/58"
+              >
+                {item.title}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          {result.outcomeTracker.checkpoints.map((checkpoint) => (
+            <div
+              key={checkpoint.label}
+              className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3"
+            >
+              <div className="text-sm font-semibold text-white">
+                {checkpoint.label}
+              </div>
+              <div className="mt-1 text-xs text-white/45">
+                {new Date(checkpoint.dueAt).toLocaleDateString()}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {result.outcomeTracker.notes.length ? (
+        <p className="mt-4 text-sm leading-relaxed text-white/55">
+          {result.outcomeTracker.notes[0]}
+        </p>
+      ) : null}
     </div>
   )
 }
@@ -1076,6 +1551,12 @@ function SharePanel({
         <div className="mt-4 text-sm text-white/62">
           Key evidence: {result.evidence[0]?.title} ({result.evidence[0]?.value})
         </div>
+        <a
+          href={`/debate/${result.id}`}
+          className="mt-4 inline-flex items-center gap-1 text-sm text-[#ffee03] hover:text-white"
+        >
+          Open public debate <ExternalLink className="size-3" />
+        </a>
       </div>
     </div>
   )
@@ -1087,17 +1568,23 @@ function SodexActionPanel({
   amount,
   side,
   intent,
+  intentLoading,
+  walletAddress,
   onAmount,
   onSide,
+  onConnectWallet,
   onBuild,
 }: {
   sodex: SodexState | null
   market: SodexMarket | null
   amount: string
   side: "buy" | "sell"
-  intent: string | null
+  intent: SodexOrderIntent | null
+  intentLoading: boolean
+  walletAddress: string | null
   onAmount: (value: string) => void
   onSide: (value: "buy" | "sell") => void
+  onConnectWallet: () => void
   onBuild: () => void
 }) {
   return (
@@ -1152,25 +1639,62 @@ function SodexActionPanel({
               onChange={(event) => onAmount(event.target.value)}
               inputMode="decimal"
               className="rounded-md border border-white/12 bg-white/[0.03] px-3 py-2 text-sm text-white outline-none focus:border-[#ffee03]/70"
-              placeholder="USDC size"
+              placeholder={side === "buy" ? "USDC funds" : "Base quantity"}
             />
             <Button
               onClick={onBuild}
+              disabled={intentLoading}
               className="bg-[#ffee03] text-black hover:bg-white"
             >
+              {intentLoading ? <Loader2 className="size-4 animate-spin" /> : null}
               Build Intent
             </Button>
           </div>
 
+          <div className="mt-4 flex flex-col gap-3 border-t border-white/10 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-xs text-white/45">Signer</div>
+              <div className="mt-1 truncate text-sm text-white/70">
+                {walletAddress ?? "No wallet connected"}
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onConnectWallet}
+              className="border-white/20 bg-white/8 text-white hover:bg-white hover:text-black"
+            >
+              <WalletCards className="size-4" />
+              {walletAddress ? "Change Wallet" : "Connect Wallet"}
+            </Button>
+          </div>
+
           {intent ? (
-            <pre className="mt-4 max-h-56 overflow-auto rounded-md bg-black/70 p-4 text-xs leading-relaxed text-white/62">
-              {intent}
-            </pre>
+            <>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="border-l border-white/12 pl-3">
+                  <div className="text-xs text-white/45">Submit path</div>
+                  <div className="mt-1 text-sm text-white/70">
+                    {intent.signing.submitPath}
+                  </div>
+                </div>
+                <div className="border-l border-white/12 pl-3">
+                  <div className="text-xs text-white/45">Ready to submit</div>
+                  <div className="mt-1 text-sm text-white/70">
+                    {intent.readiness.canSubmit ? "yes" : "signature required"}
+                  </div>
+                </div>
+              </div>
+              <pre className="mt-4 max-h-56 overflow-auto rounded-md bg-black/70 p-4 text-xs leading-relaxed text-white/62">
+                {JSON.stringify(intent, null, 2)}
+              </pre>
+            </>
           ) : (
             <p className="mt-4 text-sm leading-relaxed text-white/55">
-              SoDEX public data is live. Signed order submission is intentionally
-              kept as an unsigned intent until wallet/API signing credentials are
-              added.
+              SoDEX public data is live. The generated preview prepares the
+              signed-write payload and EIP-712 headers without submitting an
+              order.
             </p>
           )}
         </>
@@ -1204,17 +1728,27 @@ function EmptyWorkflow() {
   )
 }
 
-function Leaderboard({ archive }: { archive: DebateResult[] }) {
+function Leaderboard({
+  archive,
+  assetVoteHistory,
+  storage,
+}: {
+  archive: DebateResult[]
+  assetVoteHistory: AssetVoteHistory[]
+  storage: ArchivePayload["storage"]
+}) {
   const stats = useMemo(() => {
     const debates = archive.length
     const evidence = archive.reduce((sum, item) => sum + item.evidence.length, 0)
+    const votes = archive.reduce((sum, item) => sum + totalVotes(item.votes), 0)
     const bullWins = archive.filter((item) => item.winnerLean === "Bull").length
     const bearWins = archive.filter((item) => item.winnerLean === "Bear").length
-    const reputation = debates * 25 + evidence * 3
+    const reputation = debates * 25 + evidence * 3 + votes * 5
 
     return {
       debates,
       evidence,
+      votes,
       bullWins,
       bearWins,
       reputation,
@@ -1233,6 +1767,7 @@ function Leaderboard({ archive }: { archive: DebateResult[] }) {
       <div className="mt-6 space-y-5">
         <MetricRow label="Debates submitted" value={stats.debates} />
         <MetricRow label="Evidence reviewed" value={stats.evidence} />
+        <MetricRow label="Community votes" value={stats.votes} />
         <MetricRow label="Bull-leaning verdicts" value={stats.bullWins} />
         <MetricRow label="Bear-leaning verdicts" value={stats.bearWins} />
       </div>
@@ -1243,9 +1778,40 @@ function Leaderboard({ archive }: { archive: DebateResult[] }) {
           {stats.reputation}
         </div>
         <p className="mt-3 text-sm leading-relaxed text-white/55">
-          Reputation is calculated locally from debates generated, evidence
-          inspected, and verdict history. Wave 2 moves this into user accounts.
+          Reputation uses saved debates, inspected evidence, verdict history,
+          and community votes. Store: {storage}.
         </p>
+      </div>
+
+      <div className="mt-8 border-t border-white/10 pt-5">
+        <div className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.18em] text-[#ffee03]">
+          <Database className="size-4" />
+          Asset vote history
+        </div>
+        <div className="space-y-3">
+          {assetVoteHistory.slice(0, 5).map((item) => {
+            const total = totalVotes(item.votes)
+
+            return (
+              <div key={item.symbol} className="border-l border-white/12 pl-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-semibold text-white">{item.symbol}</span>
+                  <span className="text-xs text-white/45">
+                    {item.debates} debates
+                  </span>
+                </div>
+                <div className="mt-1 text-xs text-white/55">
+                  Bull {votePercent(item.votes.bull, total)} · Bear{" "}
+                  {votePercent(item.votes.bear, total)} · Draw{" "}
+                  {votePercent(item.votes.draw, total)}
+                </div>
+              </div>
+            )
+          })}
+          {!assetVoteHistory.length ? (
+            <div className="text-sm text-white/55">No asset votes yet.</div>
+          ) : null}
+        </div>
       </div>
     </aside>
   )

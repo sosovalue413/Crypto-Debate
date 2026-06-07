@@ -16,7 +16,7 @@ const nabla = Nabla({ subsets: ["latin"], variable: "--font-nabla" });
 
 export const metadata: Metadata = {
   title: 'CryptoDebate',
-  description: 'AI bull and bear agents debate crypto theses with live SoSoValue evidence and SoDEX market context.',
+  description: 'AI bull and bear agents debate crypto theses with live SoSoValue, SoSoValue Indexes, grounding audits, outcome tracking, and SoDEX market context.',
   generator: 'CryptoDebate',
   icons: {
     icon: [
