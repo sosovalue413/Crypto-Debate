@@ -1,3 +1,4 @@
+import { get, put } from "@vercel/blob"
 import { mkdir, readFile, writeFile } from "fs/promises"
 import path from "path"
 import type {
@@ -39,6 +40,21 @@ function redisConfig() {
     url: url.replace(/\/$/, ""),
     token,
     prefix: process.env.CRYPTODEBATE_STORE_PREFIX ?? "cryptodebate",
+  }
+}
+
+function blobConfig() {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return null
+  }
+
+  const prefix = process.env.CRYPTODEBATE_STORE_PREFIX ?? "cryptodebate"
+  const fileName = path.basename(
+    process.env.CRYPTODEBATE_FILE_STORE_NAME ?? "cryptodebate-store.json",
+  )
+
+  return {
+    pathname: `${prefix}/${fileName}`,
   }
 }
 
@@ -207,6 +223,7 @@ async function readFileState(): Promise<StoredState> {
 
 async function writeFileState(state: StoredState) {
   Object.assign(memoryState.debates, state.debates)
+  memoryState.ballots = state.ballots
 
   try {
     const filePath = storePath()
@@ -218,6 +235,59 @@ async function writeFileState(state: StoredState) {
   }
 }
 
+async function readBlobState(): Promise<StoredState> {
+  const config = blobConfig()
+
+  if (!config) {
+    throw new Error("Blob store is not configured.")
+  }
+
+  try {
+    const blob = await get(config.pathname, {
+      access: "private",
+    })
+
+    if (!blob || blob.statusCode !== 200) {
+      return memoryState
+    }
+
+    const parsed = (await new Response(blob.stream).json()) as StoredState
+    const debates = Object.fromEntries(
+      Object.entries(parsed.debates ?? {}).flatMap(([id, debate]) => {
+        const normalized = normalizeDebate(debate)
+
+        return normalized ? [[id, normalized]] : []
+      }),
+    )
+
+    return {
+      debates,
+      ballots: parsed.ballots ?? {},
+    }
+  } catch {
+    return memoryState
+  }
+}
+
+async function writeBlobState(state: StoredState) {
+  const config = blobConfig()
+
+  if (!config) {
+    throw new Error("Blob store is not configured.")
+  }
+
+  Object.assign(memoryState.debates, state.debates)
+  memoryState.ballots = state.ballots
+
+  await put(config.pathname, JSON.stringify(state), {
+    access: "private",
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    cacheControlMaxAge: 60,
+    contentType: "application/json",
+  })
+}
+
 function mergeDebateVotes(debate: DebateResult, votes: DebateVotes) {
   return {
     ...debate,
@@ -226,7 +296,15 @@ function mergeDebateVotes(debate: DebateResult, votes: DebateVotes) {
 }
 
 export function getStoreBackend() {
-  return redisConfig() ? "redis" : "file"
+  if (redisConfig()) {
+    return "redis"
+  }
+
+  if (blobConfig()) {
+    return "blob"
+  }
+
+  return "file"
 }
 
 export async function saveDebate(result: DebateResult) {
@@ -253,6 +331,15 @@ export async function saveDebate(result: DebateResult) {
     return debate
   }
 
+  if (blobConfig()) {
+    const state = await readBlobState()
+
+    state.debates[debate.id] = debate
+    await writeBlobState(state)
+
+    return debate
+  }
+
   const state = await readFileState()
 
   state.debates[debate.id] = debate
@@ -273,6 +360,12 @@ export async function getDebate(debateId: string) {
       typeof rawDebate === "string" ? normalizeDebate(JSON.parse(rawDebate)) : null
 
     return parsed ? mergeDebateVotes(parsed, votesFromRedis(rawVotes)) : null
+  }
+
+  if (blobConfig()) {
+    const state = await readBlobState()
+
+    return normalizeDebate(state.debates[debateId])
   }
 
   const state = await readFileState()
@@ -312,6 +405,19 @@ export async function listDebates(limit = 50) {
 
       return debate ? [mergeDebateVotes(debate, votesFromRedis(rawVotes))] : []
     })
+  }
+
+  if (blobConfig()) {
+    const state = await readBlobState()
+
+    return Object.values(state.debates)
+      .map(normalizeDebate)
+      .filter((debate): debate is DebateResult => Boolean(debate))
+      .sort(
+        (a, b) =>
+          Date.parse(b.generatedAt) - Date.parse(a.generatedAt),
+      )
+      .slice(0, limit)
   }
 
   const state = await readFileState()
@@ -389,6 +495,33 @@ export async function castVote(input: {
 
     return {
       votes: debate?.votes ?? { ...emptyVotes, [vote]: 1 },
+      previousVote,
+      currentVote: vote,
+    }
+  }
+
+  if (blobConfig()) {
+    const state = await readBlobState()
+    const debate = normalizeDebate(state.debates[debateId]) ?? existing
+    const votes = normalizeVotes(debate?.votes)
+    const debateBallots = state.ballots[debateId] ?? {}
+    const previousVote = debateBallots[voterId]
+
+    if (previousVote !== vote) {
+      if (previousVote) {
+        votes[previousVote] = Math.max(0, votes[previousVote] - 1)
+      }
+
+      votes[vote] += 1
+      debateBallots[voterId] = vote
+    }
+
+    state.debates[debateId] = mergeDebateVotes(debate, votes)
+    state.ballots[debateId] = debateBallots
+    await writeBlobState(state)
+
+    return {
+      votes,
       previousVote,
       currentVote: vote,
     }

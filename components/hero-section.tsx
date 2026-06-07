@@ -79,7 +79,7 @@ type SodexState = {
 type ArchivePayload = {
   archive: DebateResult[]
   assetVotes: AssetVoteHistory[]
-  storage: "redis" | "file"
+  storage: "redis" | "blob" | "file"
 }
 
 type Eip1193Provider = {
