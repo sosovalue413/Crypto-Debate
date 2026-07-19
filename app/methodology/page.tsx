@@ -4,7 +4,7 @@ import { SiteNav } from "@/components/site-nav"
 export const metadata: Metadata = {
   title: "Methodology",
   description:
-    "How CryptoDebate grounds AI arguments in SoSoValue evidence, SoSoValue Indexes, SoDEX data, and post-generation citation audits.",
+    "How CryptoDebate grounds AI arguments in SoSoValue market, index, macro, news, SoDEX data, and post-generation citation audits.",
   alternates: {
     canonical: "/methodology",
   },
@@ -18,7 +18,7 @@ export const metadata: Metadata = {
 
 const pipeline = [
   "Resolve thesis assets through the SoSoValue currency list.",
-  "Collect SoSoValue market, kline, ETF flow, news, and Index evidence.",
+  "Collect SoSoValue market, kline, ETF flow, Index, Macro calendar, and news evidence.",
   "Collect SoDEX public spot market context for the same symbols.",
   "Send OpenAI only the thesis and summarized evidence cards with IDs.",
   "Reject invalid citation IDs and repair speeches with unsupported numeric claims.",
@@ -28,7 +28,7 @@ const pipeline = [
 const guards = [
   "Concrete market claims must appear in the thesis or a cited evidence card.",
   "Bull and Bear speeches keep only evidence IDs that exist in the collected dataset.",
-  "If a speech invents unsupported numbers, it is rebuilt from cited evidence.",
+  "If a speech invents unsupported numbers or event claims, it is rebuilt from cited evidence.",
   "SoDEX execution is an unsigned preview until a signer, API key, nonce, and EIP-712 signature exist.",
 ]
 
@@ -90,10 +90,10 @@ export default function MethodologyPage() {
               href="https://sosovalue-1.gitbook.io/sosovalue-api-doc"
               className="border-l border-white/12 pl-4 text-sm text-white/65 hover:text-white"
             >
-              SoSoValue market, ETF, kline, and news evidence
+              SoSoValue market, ETF, kline, macro, and news evidence
             </a>
             <a
-              href="https://ssi.sosovalue.com/en"
+              href="https://sosovalue-1.gitbook.io/sosovalue-api-doc/3.-sosovalue-index/index"
               className="border-l border-white/12 pl-4 text-sm text-white/65 hover:text-white"
             >
               SoSoValue Indexes constituents, returns, and historical klines

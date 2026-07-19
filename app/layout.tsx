@@ -14,6 +14,8 @@ const spaceGrotesk = Space_Grotesk({
   variable: "--font-space-grotesk",
 });
 const nabla = Nabla({ subsets: ["latin"], variable: "--font-nabla" });
+const analyticsEnabled =
+  process.env.VERCEL === "1" || Boolean(process.env.VERCEL_ENV)
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -79,7 +81,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${geist.variable} ${geistMono.variable} ${spaceGrotesk.variable} ${nabla.variable} font-sans antialiased`}>
         {children}
-        <Analytics />
+        {analyticsEnabled ? <Analytics /> : null}
       </body>
     </html>
   )

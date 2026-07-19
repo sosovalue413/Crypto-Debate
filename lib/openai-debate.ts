@@ -4,7 +4,7 @@ import type {
   DebateRound,
   EvidencePoint,
 } from "@/lib/types"
-import { clamp } from "@/lib/server-utils"
+import { clamp, timeoutSignal } from "@/lib/server-utils"
 
 type AiPayload = {
   title: string
@@ -144,6 +144,8 @@ const factualClaimTerms = [
   "upgrade",
 ]
 
+const OPENAI_FETCH_TIMEOUT_MS = 60 * 1000
+
 function allowedEvidenceText(thesis: string, citedEvidence: EvidencePoint[]) {
   return [
     thesis,
@@ -235,18 +237,18 @@ function fallbackDecisionBrief(evidence: EvidencePoint[]): DebateResult["decisio
       ? `The strongest risk case is anchored to ${evidenceTitles(downside)}.`
       : "The risk case is mainly uncertainty from limited live confirmation.",
     keyAssumptions: [
-      "The cited market, flow, index, news, and SoDEX context remains directionally valid after the debate.",
+      "The cited market, flow, index, macro, news, and SoDEX context remains directionally valid after the debate.",
       "The thesis horizon is long enough for noisy short-term data to resolve.",
       "Liquidity is sufficient before any execution workflow is considered.",
     ],
     invalidationSignals: [
       "The strongest cited evidence reverses for multiple sessions.",
-      "ETF or index context diverges from the thesis direction.",
+      "ETF, index, or macro context diverges from the thesis direction.",
       "SoDEX liquidity context becomes too thin for the intended action.",
     ],
     nextMetricsToWatch: [
       "24h and 30D price path",
-      "ETF net flow where available",
+      "ETF net flow and macro calendar updates where available",
       "SoDEX quote volume and spread context",
     ],
     evidenceGaps: evidence.length
@@ -545,6 +547,7 @@ export async function generateOpenAiDebate(input: {
       max_output_tokens: input.mode === "quick" ? 1600 : 3600,
     }),
     cache: "no-store",
+    signal: timeoutSignal(OPENAI_FETCH_TIMEOUT_MS),
   })
 
   const payload = (await response.json().catch(() => null)) as Record<

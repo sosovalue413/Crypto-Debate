@@ -67,3 +67,23 @@ export function boundedInteger(value: unknown, fallback: number, max: number) {
 
   return Math.min(Math.floor(parsed), max)
 }
+
+export function timeoutSignal(ms: number) {
+  const abortSignalTimeout = (AbortSignal as typeof AbortSignal & {
+    timeout?: (milliseconds: number) => AbortSignal
+  }).timeout
+
+  if (abortSignalTimeout) {
+    return abortSignalTimeout(ms)
+  }
+
+  const controller = new AbortController()
+
+  const timeoutId = setTimeout(() => controller.abort(), ms) as ReturnType<
+    typeof setTimeout
+  > & { unref?: () => void }
+
+  timeoutId.unref?.()
+
+  return controller.signal
+}

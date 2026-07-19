@@ -7,12 +7,14 @@ import type {
   DebateSide,
   DebateVotes,
 } from "@/lib/types"
+import { timeoutSignal } from "@/lib/server-utils"
 
 const emptyVotes: DebateVotes = {
   bull: 0,
   bear: 0,
   draw: 0,
 }
+const STORE_TIMEOUT_MS = 12 * 1000
 
 type StoredState = {
   debates: Record<string, DebateResult>
@@ -22,6 +24,22 @@ type StoredState = {
 const memoryState: StoredState = {
   debates: {},
   ballots: {},
+}
+
+function withStoreTimeout<T>(label: string, operation: Promise<T>) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`${label} timed out after ${STORE_TIMEOUT_MS}ms.`)),
+      STORE_TIMEOUT_MS,
+    )
+  })
+
+  return Promise.race([operation, timeout]).finally(() => {
+    if (timeoutId) {
+      clearTimeout(timeoutId)
+    }
+  })
 }
 
 function redisConfig() {
@@ -168,6 +186,7 @@ async function redisCommand<T>(command: unknown[]) {
     },
     body: JSON.stringify(command),
     cache: "no-store",
+    signal: timeoutSignal(STORE_TIMEOUT_MS),
   })
   const payload = (await response.json().catch(() => null)) as
     | { result?: T; error?: string }
@@ -195,6 +214,7 @@ async function redisPipeline(commands: unknown[][]) {
     },
     body: JSON.stringify(commands),
     cache: "no-store",
+    signal: timeoutSignal(STORE_TIMEOUT_MS),
   })
   const payload = (await response.json().catch(() => null)) as
     | Array<{ result?: unknown; error?: string }>
@@ -256,16 +276,22 @@ async function readBlobState(): Promise<StoredState> {
   }
 
   try {
-    const blob = await get(config.pathname, {
-      access: "private",
-      useCache: false,
-    })
+    const blob = await withStoreTimeout(
+      "Blob aggregate read",
+      get(config.pathname, {
+        access: "private",
+        useCache: false,
+      }),
+    )
 
     if (!blob || blob.statusCode !== 200) {
       return memoryState
     }
 
-    const parsed = (await new Response(blob.stream).json()) as StoredState
+    const parsed = (await withStoreTimeout(
+      "Blob aggregate parse",
+      new Response(blob.stream).json(),
+    )) as StoredState
     const debates = Object.fromEntries(
       Object.entries(parsed.debates ?? {}).flatMap(([id, debate]) => {
         const normalized = normalizeDebate(debate)
@@ -291,16 +317,24 @@ async function readBlobDebate(debateId: string) {
   }
 
   try {
-    const blob = await get(pathname, {
-      access: "private",
-      useCache: false,
-    })
+    const blob = await withStoreTimeout(
+      "Blob debate read",
+      get(pathname, {
+        access: "private",
+        useCache: false,
+      }),
+    )
 
     if (!blob || blob.statusCode !== 200) {
       return null
     }
 
-    return normalizeDebate(await new Response(blob.stream).json())
+    return normalizeDebate(
+      await withStoreTimeout(
+        "Blob debate parse",
+        new Response(blob.stream).json(),
+      ),
+    )
   } catch {
     return null
   }
@@ -313,13 +347,16 @@ async function writeBlobDebate(debate: DebateResult) {
     return
   }
 
-  await put(pathname, JSON.stringify(debate), {
-    access: "private",
-    addRandomSuffix: false,
-    allowOverwrite: true,
-    cacheControlMaxAge: 60,
-    contentType: "application/json",
-  })
+  await withStoreTimeout(
+    "Blob debate write",
+    put(pathname, JSON.stringify(debate), {
+      access: "private",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      cacheControlMaxAge: 60,
+      contentType: "application/json",
+    }),
+  )
 }
 
 async function listBlobDebates(limit: number) {
@@ -330,10 +367,13 @@ async function listBlobDebates(limit: number) {
   }
 
   try {
-    const result = await list({
-      limit: Math.max(limit, 100),
-      prefix: `${config.debatePrefix}/`,
-    })
+    const result = await withStoreTimeout(
+      "Blob debate list",
+      list({
+        limit: Math.max(limit, 100),
+        prefix: `${config.debatePrefix}/`,
+      }),
+    )
     const newest = result.blobs
       .filter((blob) => blob.pathname.endsWith(".json"))
       .sort(
@@ -362,13 +402,16 @@ async function writeBlobState(state: StoredState) {
   Object.assign(memoryState.debates, state.debates)
   memoryState.ballots = state.ballots
 
-  await put(config.pathname, JSON.stringify(state), {
-    access: "private",
-    addRandomSuffix: false,
-    allowOverwrite: true,
-    cacheControlMaxAge: 60,
-    contentType: "application/json",
-  })
+  await withStoreTimeout(
+    "Blob aggregate write",
+    put(config.pathname, JSON.stringify(state), {
+      access: "private",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      cacheControlMaxAge: 60,
+      contentType: "application/json",
+    }),
+  )
 }
 
 function mergeDebateVotes(debate: DebateResult, votes: DebateVotes) {

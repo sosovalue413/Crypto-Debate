@@ -31,7 +31,9 @@ function buildOutcomeTracker(input: {
 }): DebateResult["outcomeTracker"] {
   const baselineEvidence = input.evidence
     .filter((item) =>
-      ["market", "technical", "flow", "index", "dex"].includes(item.kind),
+      ["market", "technical", "flow", "index", "macro", "dex"].includes(
+        item.kind,
+      ),
     )
     .slice(0, 5)
   const baselineAt = input.generatedAt
@@ -44,7 +46,9 @@ function buildOutcomeTracker(input: {
       baselineEvidenceIds: [],
       trackedSymbols: input.assetSymbols,
       checkpoints: [],
-      notes: ["Outcome tracking needs at least one market, flow, index, or SoDEX evidence card."],
+      notes: [
+        "Outcome tracking needs at least one market, flow, index, macro, or SoDEX evidence card.",
+      ],
     }
   }
 
@@ -71,7 +75,7 @@ function buildOutcomeTracker(input: {
       },
     ],
     notes: [
-      "Baseline uses only live evidence collected for this debate.",
+      "Baseline uses only live evidence collected for this debate, including macro calendar context when available.",
       "Future checks compare the thesis against the same tracked symbols and evidence families.",
     ],
   }

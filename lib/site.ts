@@ -5,7 +5,7 @@ export const SITE_URL = (
 ).replace(/\/$/, "")
 
 export const SITE_DESCRIPTION =
-  "AI bull and bear agents debate crypto theses with live SoSoValue evidence, SoSoValue Indexes, grounding audits, outcome tracking, and SoDEX market context."
+  "AI bull and bear agents debate crypto theses with live SoSoValue market, index, macro, and news evidence, grounding audits, outcome tracking, and SoDEX market context."
 
 export function absoluteUrl(path = "/") {
   return `${SITE_URL}${path.startsWith("/") ? path : `/${path}`}`

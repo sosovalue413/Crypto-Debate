@@ -5,10 +5,12 @@ import {
   ArrowRight,
   BarChart3,
   BrainCircuit,
+  CalendarDays,
   Check,
   Clipboard,
   ExternalLink,
   Gavel,
+  Layers,
   Loader2,
   ShieldCheck,
   Sparkles,
@@ -51,15 +53,19 @@ const examples = [
   "BTC will hit $200k by the end of 2026",
   "Ethereum will flip Bitcoin in market cap by 2027",
   "Solana will outperform ETH this cycle",
-  "AI tokens are entering a new supercycle",
+  "China stimulus will push BTC and ETH higher this quarter",
 ]
 
 const loadingCopy = [
   "Resolving assets from the thesis",
-  "Pulling SoSoValue market, flow, and news evidence",
+  "Pulling SoSoValue market, flow, macro, and news evidence",
   "Checking SoDEX public market data",
   "Letting Bull and Bear build their cases",
 ]
+
+const API_TIMEOUT_MS = 15 * 1000
+const DEBATE_TIMEOUT_MS = 150 * 1000
+const INTENT_TIMEOUT_MS = 30 * 1000
 
 type FeaturedTopic = {
   thesis: string
@@ -75,6 +81,35 @@ type SodexState = {
 
 type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
+}
+
+async function fetchJson<T>(
+  url: string,
+  init: RequestInit | undefined,
+  timeoutMs: number,
+) {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    })
+    const payload = (await response.json().catch(() => ({}))) as T & {
+      error?: string
+    }
+
+    return { response, payload }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Request timed out. Please retry in a moment.")
+    }
+
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
+  }
 }
 
 function createLocalId() {
@@ -143,18 +178,16 @@ export function HeroSection() {
   }, [])
 
   useEffect(() => {
-    fetch("/api/featured")
-      .then((response) => response.json())
-      .then((payload: { topic?: FeaturedTopic }) => {
+    fetchJson<{ topic?: FeaturedTopic }>("/api/featured", undefined, API_TIMEOUT_MS)
+      .then(({ payload }) => {
         if (payload.topic) {
           setFeatured(payload.topic)
         }
       })
       .catch(() => setFeatured(null))
 
-    fetch("/api/sodex")
-      .then((response) => response.json())
-      .then((payload: SodexState) => setSodex(payload))
+    fetchJson<SodexState>("/api/sodex", undefined, API_TIMEOUT_MS)
+      .then(({ payload }) => setSodex(payload))
       .catch(() => setSodex(null))
   }, [])
 
@@ -213,17 +246,20 @@ export function HeroSection() {
     setMode(nextMode)
 
     try {
-      const response = await fetch("/api/debate", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
+      const { response, payload } = await fetchJson<DebateResult>(
+        "/api/debate",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            thesis,
+            mode: nextMode,
+          }),
         },
-        body: JSON.stringify({
-          thesis,
-          mode: nextMode,
-        }),
-      })
-      const payload = await response.json()
+        DEBATE_TIMEOUT_MS,
+      )
 
       if (!response.ok) {
         throw new Error(payload.error ?? "Unable to generate debate.")
@@ -267,18 +303,20 @@ export function HeroSection() {
     setError(null)
 
     try {
-      const response = await fetch("/api/vote", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ debateId: result.id, vote, voterId }),
-      })
-      const payload = (await response.json()) as {
+      const { response, payload } = await fetchJson<{
         votes?: DebateVotes
         currentVote?: DebateSide
-        error?: string
-      }
+      }>(
+        "/api/vote",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ debateId: result.id, vote, voterId }),
+        },
+        API_TIMEOUT_MS,
+      )
 
       if (!response.ok) {
         throw new Error(payload.error ?? "Vote was not saved.")
@@ -380,23 +418,25 @@ export function HeroSection() {
     setError(null)
 
     try {
-      const response = await fetch("/api/sodex/intent", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          debateId: result?.id,
-          symbol: selectedMarket.symbol,
-          side: intentSide,
-          amount,
-          walletAddress,
-        }),
-      })
-      const payload = (await response.json()) as {
+      const { response, payload } = await fetchJson<{
         intent?: SodexOrderIntent
-        error?: string
-      }
+      }>(
+        "/api/sodex/intent",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            debateId: result?.id,
+            symbol: selectedMarket.symbol,
+            side: intentSide,
+            amount,
+            walletAddress,
+          }),
+        },
+        INTENT_TIMEOUT_MS,
+      )
 
       if (!response.ok || !payload.intent) {
         throw new Error(payload.error ?? "Unable to build SoDEX intent.")
@@ -465,7 +505,7 @@ export function HeroSection() {
                 CryptoDebate
               </div>
               <div className="text-xs uppercase tracking-[0.28em] text-[#ffee03]">
-                Wave 2
+                Wave 3
               </div>
             </div>
           </nav>
@@ -484,8 +524,9 @@ export function HeroSection() {
                 <div className="max-w-xl">
                   <p className="text-lg leading-relaxed text-muted-foreground md:text-xl">
                     Type any crypto thesis. Bull AI and Bear AI argue it with
-                    live SoSoValue evidence, community voting, an archive, and a
-                    SoDEX action intent when the debate is done.
+                    live SoSoValue market, index, macro, and news evidence,
+                    community voting, an archive, and a SoDEX action intent
+                    when the debate is done.
                   </p>
 
                   <div className="mt-6 flex flex-wrap gap-2">
@@ -596,7 +637,7 @@ export function HeroSection() {
               AI debate engine
             </span>
             <span className="max-w-[60vw] text-right text-sm text-muted-foreground">
-              Live data layer: SoSoValue API plus SoDEX public market endpoints
+              Live data layer: SoSoValue API, macro calendar, indexes, and SoDEX
             </span>
           </div>
         </section>
@@ -630,6 +671,11 @@ export function HeroSection() {
                   <MetaPill icon={ShieldCheck}>
                     Grounding {result.grounding.status}
                   </MetaPill>
+                  <MetaPill icon={CalendarDays}>
+                    {result.evidence.some((item) => item.kind === "macro")
+                      ? "Macro lens live"
+                      : "Macro lens unavailable"}
+                  </MetaPill>
                 </div>
               ) : null}
             </div>
@@ -662,6 +708,8 @@ export function HeroSection() {
                 </div>
 
                 <div id="evidence" className="space-y-8">
+                  <EvidenceMixPanel evidence={result.evidence} />
+
                   <EvidencePanel
                     evidence={result.evidence}
                     selected={selectedEvidence}
@@ -865,6 +913,73 @@ function DecisionBriefPanel({ result }: { result: DebateResult }) {
           </div>
           <p className="mt-3 text-sm leading-relaxed text-white/62">
             {result.decisionBrief.evidenceGaps[0]}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function EvidenceMixPanel({ evidence }: { evidence: EvidencePoint[] }) {
+  const kinds: Array<{
+    kind: EvidencePoint["kind"]
+    label: string
+  }> = [
+    { kind: "market", label: "Market" },
+    { kind: "technical", label: "Technical" },
+    { kind: "flow", label: "ETF flow" },
+    { kind: "index", label: "Index" },
+    { kind: "macro", label: "Macro" },
+    { kind: "news", label: "News" },
+    { kind: "dex", label: "SoDEX" },
+  ]
+  const macro = evidence.find((item) => item.kind === "macro")
+
+  return (
+    <div className="border-y border-white/12 py-5">
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#ffee03]">
+            Evidence mix
+          </p>
+          <h3 className="mt-2 font-[family-name:var(--font-display)] text-2xl font-bold">
+            Coverage by source
+          </h3>
+        </div>
+        <Layers className="size-6 text-white/45" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {kinds.map(({ kind, label }) => {
+          const count = evidence.filter((item) => item.kind === kind).length
+
+          return (
+            <div
+              key={kind}
+              className={cn(
+                "rounded-md border px-3 py-2",
+                count
+                  ? "border-[#ffee03]/25 bg-[#ffee03]/10"
+                  : "border-white/10 bg-white/[0.03]",
+              )}
+            >
+              <div className="text-xs text-white/45">{label}</div>
+              <div className="mt-1 font-[family-name:var(--font-display)] text-xl font-bold text-white">
+                {count}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {macro ? (
+        <div className="mt-4 border-l border-[#ffee03]/40 pl-4">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#ffee03]">
+            <CalendarDays className="size-4" />
+            Macro watch
+          </div>
+          <p className="mt-2 text-sm leading-relaxed text-white/62">
+            {macro.summary}
           </p>
         </div>
       ) : null}
@@ -1538,7 +1653,7 @@ function EmptyWorkflow() {
     <div className="mt-12 grid gap-5 md:grid-cols-4">
       {[
         ["1", "Thesis", "User enters any crypto market idea."],
-        ["2", "Evidence", "SoSoValue pulls market, flow, and news data."],
+        ["2", "Evidence", "SoSoValue pulls market, index, macro, and news data."],
         ["3", "Debate", "Bull and Bear argue with cited evidence IDs."],
         ["4", "Vote", "Users pick a winner and build a SoDEX intent."],
       ].map(([step, label, copy]) => (

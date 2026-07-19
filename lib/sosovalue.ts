@@ -7,16 +7,22 @@ import {
   safeArray,
   stableId,
   stripHtml,
+  timeoutSignal,
   toDateInput,
 } from "@/lib/server-utils"
 
-const SOSO_BASE_URL =
+const SOSO_BASE_URL = (
   process.env.SOSOVALUE_BASE_URL ?? "https://openapi.sosovalue.com/openapi/v1"
+).replace(/\/+$/, "")
 
 type SosoResponse<T> = {
   code: number
   message?: string
   data: T | null
+  details?: {
+    retry_after?: number | string
+    retryAfter?: number | string
+  }
 }
 
 type CachedSosoResponse = {
@@ -91,6 +97,22 @@ type NewsItem = {
   tags?: string[]
 }
 
+type MacroEventDay = {
+  date: string
+  events: string[]
+}
+
+type MacroEventHistory = {
+  date: string
+  actual?: number | string
+  forecast?: number | string
+  previous?: number | string
+}
+
+type SosoGlobalStore = typeof globalThis & {
+  __cryptodebateSosoRequests?: number[]
+}
+
 let currenciesCache: {
   value: CurrencyListItem[]
   expiresAt: number
@@ -139,6 +161,48 @@ const SYMBOL_ALIASES: Record<string, string> = {
   apt: "APT",
 }
 
+const SOSO_LOCAL_LIMIT = 18
+const SOSO_LOCAL_WINDOW_MS = 60 * 1000
+const SOSO_FETCH_TIMEOUT_MS = 12 * 1000
+const SOSO_CACHE_TIMEOUT_MS = 5 * 1000
+
+const CHINA_MACRO_TERMS = [
+  "china",
+  "chinese",
+  "yuan",
+  "cny",
+  "renminbi",
+  "pboc",
+  "hong kong",
+  "hong-kong",
+  "hk",
+  "asia",
+  "asian",
+  "stimulus",
+]
+
+const BROAD_MACRO_TERMS = [
+  "macro",
+  "fed",
+  "fomc",
+  "cpi",
+  "pce",
+  "inflation",
+  "rate",
+  "rates",
+  "jobs",
+  "payroll",
+  "gdp",
+  "liquidity",
+  "dollar",
+  "dxy",
+  "recession",
+  "employment",
+  "unemployment",
+  "pmi",
+  "tariff",
+]
+
 export class SosoConfigError extends Error {
   constructor() {
     super("SOSOVALUE_API_KEY is missing")
@@ -153,6 +217,22 @@ export class SosoRateLimitError extends Error {
     this.name = "SosoRateLimitError"
     this.retryAfter = retryAfter
   }
+}
+
+function withSosoCacheTimeout<T>(label: string, operation: Promise<T>) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`${label} timed out after ${SOSO_CACHE_TIMEOUT_MS}ms.`)),
+      SOSO_CACHE_TIMEOUT_MS,
+    )
+  })
+
+  return Promise.race([operation, timeout]).finally(() => {
+    if (timeoutId) {
+      clearTimeout(timeoutId)
+    }
+  })
 }
 
 function sosoCachePath(cacheKey: string) {
@@ -172,6 +252,14 @@ function sosoCacheTtl(path: string) {
     return 60 * 60 * 1000
   }
 
+  if (path === "/macro/events") {
+    return 60 * 1000
+  }
+
+  if (path.includes("/macro/events/")) {
+    return 15 * 60 * 1000
+  }
+
   if (path.includes("/klines") || path.includes("/summary-history")) {
     return 15 * 60 * 1000
   }
@@ -187,16 +275,22 @@ async function readSosoCache<T>(cacheKey: string, allowStale = false) {
   }
 
   try {
-    const blob = await get(pathname, {
-      access: "private",
-      useCache: false,
-    })
+    const blob = await withSosoCacheTimeout(
+      "SoSoValue cache read",
+      get(pathname, {
+        access: "private",
+        useCache: false,
+      }),
+    )
 
     if (!blob || blob.statusCode !== 200) {
       return null
     }
 
-    const cached = (await new Response(blob.stream).json()) as CachedSosoResponse
+    const cached = (await withSosoCacheTimeout(
+      "SoSoValue cache parse",
+      new Response(blob.stream).json(),
+    )) as CachedSosoResponse
 
     if (
       !cached ||
@@ -225,35 +319,85 @@ async function writeSosoCache(cacheKey: string, data: unknown, ttlMs: number) {
   }
 
   try {
-    await put(
-      pathname,
-      JSON.stringify({
-        data,
-        expiresAt: Date.now() + ttlMs,
-      } satisfies CachedSosoResponse),
-      {
-        access: "private",
-        addRandomSuffix: false,
-        allowOverwrite: true,
-        cacheControlMaxAge: 60,
-        contentType: "application/json",
-      },
+    await withSosoCacheTimeout(
+      "SoSoValue cache write",
+      put(
+        pathname,
+        JSON.stringify({
+          data,
+          expiresAt: Date.now() + ttlMs,
+        } satisfies CachedSosoResponse),
+        {
+          access: "private",
+          addRandomSuffix: false,
+          allowOverwrite: true,
+          cacheControlMaxAge: 60,
+          contentType: "application/json",
+        },
+      ),
     )
   } catch {
     return
   }
 }
 
-function retryAfterSeconds(response: Response) {
+function reserveSosoRequestSlot() {
+  const store = globalThis as SosoGlobalStore
+  const now = Date.now()
+  const requests =
+    store.__cryptodebateSosoRequests?.filter(
+      (timestamp) => now - timestamp < SOSO_LOCAL_WINDOW_MS,
+    ) ?? []
+
+  store.__cryptodebateSosoRequests = requests
+
+  if (requests.length >= SOSO_LOCAL_LIMIT) {
+    const retryAfter = Math.ceil(
+      (SOSO_LOCAL_WINDOW_MS - (now - requests[0])) / 1000,
+    )
+
+    throw new SosoRateLimitError(
+      "Local SoSoValue request budget exhausted before provider throttling.",
+      retryAfter,
+    )
+  }
+
+  requests.push(now)
+}
+
+function retryAfterSeconds<T>(response: Response, payload?: SosoResponse<T> | null) {
+  const detailsRetryAfter = Number(
+    payload?.details?.retry_after ?? payload?.details?.retryAfter ?? "",
+  )
+
+  if (Number.isFinite(detailsRetryAfter) && detailsRetryAfter > 0) {
+    return Math.ceil(detailsRetryAfter)
+  }
+
   const value = Number(response.headers.get("retry-after") ?? "")
 
   return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 60
 }
 
-function isRateLimit(response: Response, message: string | undefined) {
+function rateLimitResetSeconds(response: Response) {
+  const reset = Number(response.headers.get("x-ratelimit-reset") ?? "")
+
+  if (!Number.isFinite(reset) || reset <= Date.now()) {
+    return null
+  }
+
+  return Math.ceil((reset - Date.now()) / 1000)
+}
+
+function isRateLimit(
+  response: Response,
+  payload: SosoResponse<unknown> | null,
+) {
   return (
     response.status === 429 ||
-    /rate limit|too many requests/i.test(message ?? "")
+    payload?.code === 42901 ||
+    payload?.code === 402901 ||
+    /rate limit|too many requests/i.test(payload?.message ?? "")
   )
 }
 
@@ -261,7 +405,7 @@ async function sosoFetch<T>(
   path: string,
   params?: Record<string, string | number | undefined>,
 ) {
-  const apiKey = process.env.SOSOVALUE_API_KEY
+  const apiKey = process.env.SOSOVALUE_API_KEY?.trim()
 
   if (!apiKey) {
     throw new SosoConfigError()
@@ -282,12 +426,15 @@ async function sosoFetch<T>(
     return cached
   }
 
+  reserveSosoRequestSlot()
+
   const response = await fetch(url, {
     headers: {
       accept: "application/json",
       "x-soso-api-key": apiKey,
     },
     cache: "no-store",
+    signal: timeoutSignal(SOSO_FETCH_TIMEOUT_MS),
   })
 
   const payload = (await response.json().catch(() => null)) as
@@ -295,7 +442,7 @@ async function sosoFetch<T>(
     | null
 
   if (!response.ok || !payload || payload.code !== 0) {
-    if (isRateLimit(response, payload?.message)) {
+    if (isRateLimit(response, payload)) {
       const stale = await readSosoCache<T>(cacheKey, true)
 
       if (stale) {
@@ -304,7 +451,7 @@ async function sosoFetch<T>(
 
       throw new SosoRateLimitError(
         payload?.message ?? "SoSoValue rate limit exceeded.",
-        retryAfterSeconds(response),
+        rateLimitResetSeconds(response) ?? retryAfterSeconds(response, payload),
       )
     }
 
@@ -390,7 +537,7 @@ export async function resolveAssets(thesis: string) {
     })
   }
 
-  return Array.from(unique.values()).slice(0, 4)
+  return Array.from(unique.values()).slice(0, 3)
 }
 
 async function marketEvidence(asset: CurrencyListItem): Promise<EvidencePoint[]> {
@@ -535,12 +682,20 @@ function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter(Boolean)))
 }
 
-async function indexEvidenceForTicker(ticker: string): Promise<EvidencePoint[]> {
+async function getIndexConstituents(ticker: string) {
+  return safeArray<IndexConstituent>(
+    await sosoFetch<IndexConstituent[]>(`/indices/${ticker}/constituents`),
+  )
+}
+
+async function indexEvidenceForTicker(
+  ticker: string,
+  knownConstituents?: IndexConstituent[],
+): Promise<EvidencePoint[]> {
   const end = Date.now()
   const start = end - 31 * 24 * 60 * 60 * 1000
-  const [snapshotData, constituents, klines] = await Promise.all([
+  const [snapshotData, klines] = await Promise.all([
     sosoFetch<IndexSnapshot>(`/indices/${ticker}/market-snapshot`),
-    sosoFetch<IndexConstituent[]>(`/indices/${ticker}/constituents`),
     sosoFetch<IndexKline[]>(`/indices/${ticker}/klines`, {
       interval: "1d",
       start_time: start,
@@ -549,7 +704,7 @@ async function indexEvidenceForTicker(ticker: string): Promise<EvidencePoint[]> 
     }),
   ])
   const snapshot = snapshotData ?? {}
-  const rows = safeArray<IndexConstituent>(constituents)
+  const rows = knownConstituents ?? (await getIndexConstituents(ticker))
   const topConstituents = rows
     .slice()
     .sort((a, b) => Number(b.weight) - Number(a.weight))
@@ -581,7 +736,8 @@ async function indexEvidenceForTicker(ticker: string): Promise<EvidencePoint[]> 
       )} YTD`,
       trend: oneMonthRoi > 0.03 ? "up" : oneMonthRoi < -0.03 ? "down" : "flat",
       source: "SoSoValue Indexes",
-      sourceUrl: "https://ssi.sosovalue.com/en",
+      sourceUrl:
+        "https://sosovalue-1.gitbook.io/sosovalue-api-doc/3.-sosovalue-index/market-snapshot",
       asOf: new Date().toISOString(),
       symbol: ticker.toUpperCase(),
       raw: {
@@ -619,15 +775,13 @@ async function indexEvidence(
   const candidates = uniqueStrings([
     ...directMatches,
     ...thematicMatches,
-    ...indices.slice(0, 6),
-  ])
+    ...indices.slice(0, 2),
+  ]).slice(0, 3)
   const assetSet = new Set(assetSymbols.map((symbol) => symbol.toUpperCase()))
   const constituentResults = await Promise.allSettled(
     candidates.map(async (ticker) => ({
       ticker,
-      constituents: await sosoFetch<IndexConstituent[]>(
-        `/indices/${ticker}/constituents`,
-      ),
+      constituents: await getIndexConstituents(ticker),
     })),
   )
   const constituentMatches = constituentResults
@@ -646,19 +800,202 @@ async function indexEvidence(
     lowerThesis.includes("ssi") || lowerThesis.includes("index")
       ? candidates[0]
       : "",
-  ]).slice(0, 2)
+  ]).slice(0, 1)
 
   if (!chosen.length) {
     return []
   }
 
+  const constituentsByTicker = new Map(
+    constituentResults.flatMap((result) =>
+      result.status === "fulfilled"
+        ? [[result.value.ticker, result.value.constituents] as const]
+        : [],
+    ),
+  )
   const evidenceGroups = await Promise.allSettled(
-    chosen.map((ticker) => indexEvidenceForTicker(ticker)),
+    chosen.map((ticker) =>
+      indexEvidenceForTicker(ticker, constituentsByTicker.get(ticker)),
+    ),
   )
 
   return evidenceGroups.flatMap((result) =>
     result.status === "fulfilled" ? result.value : [],
   )
+}
+
+function lowerIncludesAny(text: string, terms: string[]) {
+  const normalizedText = ` ${text.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `
+
+  return terms.some((term) =>
+    normalizedText.includes(
+      ` ${term.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `,
+    ),
+  )
+}
+
+function macroEventTime(date: string) {
+  const time = new Date(`${date}T00:00:00Z`).getTime()
+
+  return Number.isFinite(time) ? time : 0
+}
+
+function macroRelevanceScore(input: {
+  event: string
+  date: string
+  thesis: string
+  today: string
+}) {
+  const event = input.event.toLowerCase()
+  const thesis = input.thesis.toLowerCase()
+  let score = 0
+
+  if (input.date >= input.today) {
+    score += 2
+  }
+
+  if (lowerIncludesAny(thesis, CHINA_MACRO_TERMS)) {
+    score += lowerIncludesAny(event, CHINA_MACRO_TERMS) ? 12 : 0
+  }
+
+  for (const term of [...CHINA_MACRO_TERMS, ...BROAD_MACRO_TERMS]) {
+    if (thesis.includes(term) && event.includes(term)) {
+      score += 4
+    } else if (event.includes(term)) {
+      score += 1
+    }
+  }
+
+  return score
+}
+
+function chooseMacroEvent(thesis: string, days: MacroEventDay[]) {
+  const today = toDateInput(new Date())
+  const events = days
+    .flatMap((day) =>
+      safeArray<string>(day.events).map((event) => ({
+        date: day.date,
+        event,
+        score: macroRelevanceScore({
+          event,
+          date: day.date,
+          thesis,
+          today,
+        }),
+      })),
+    )
+    .filter((item) => item.event && item.date)
+
+  if (!events.length) {
+    return null
+  }
+
+  return events
+    .slice()
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score
+      }
+
+      const aFuture = a.date >= today
+      const bFuture = b.date >= today
+
+      if (aFuture !== bFuture) {
+        return aFuture ? -1 : 1
+      }
+
+      return aFuture
+        ? macroEventTime(a.date) - macroEventTime(b.date)
+        : macroEventTime(b.date) - macroEventTime(a.date)
+    })[0]
+}
+
+async function macroEvidence(thesis: string): Promise<EvidencePoint[]> {
+  const calendar = safeArray<MacroEventDay>(
+    await sosoFetch<MacroEventDay[]>("/macro/events"),
+  )
+  const selected = chooseMacroEvent(thesis, calendar)
+
+  if (!selected) {
+    return []
+  }
+
+  const end = new Date()
+  const start = new Date(end)
+  start.setFullYear(end.getFullYear() - 1)
+
+  let history: MacroEventHistory[] = []
+
+  try {
+    history = safeArray<MacroEventHistory>(
+      await sosoFetch<MacroEventHistory[]>(
+        `/macro/events/${encodeURIComponent(selected.event)}/history`,
+        {
+          start_date: toDateInput(start),
+          end_date: toDateInput(end),
+          limit: 12,
+        },
+      ),
+    )
+  } catch {
+    history = []
+  }
+
+  const series = history
+    .slice()
+    .sort((a, b) => macroEventTime(a.date) - macroEventTime(b.date))
+    .map((row) => ({
+      label: row.date,
+      value: Number(row.actual),
+    }))
+    .filter((row) => Number.isFinite(row.value))
+  const latest = history
+    .slice()
+    .sort((a, b) => macroEventTime(b.date) - macroEventTime(a.date))[0]
+  const thesisLower = thesis.toLowerCase()
+  const isChinaThesis = lowerIncludesAny(thesisLower, CHINA_MACRO_TERMS)
+  const eventMatchesChina = lowerIncludesAny(
+    selected.event.toLowerCase(),
+    CHINA_MACRO_TERMS,
+  )
+  const selectionContext =
+    isChinaThesis && !eventMatchesChina
+      ? "No China-specific event was returned in the live SoSoValue macro calendar, so this card uses the highest-ranked available macro event for cross-market context."
+      : `${selected.event} is on the live SoSoValue macro calendar for ${selected.date}.`
+
+  return [
+    {
+      id: stableId(
+        `macro-${selected.event}-${selected.date}-${JSON.stringify(latest)}`,
+      ),
+      kind: "macro",
+      title: `${isChinaThesis ? "China macro watch" : "Macro watch"}: ${
+        selected.event
+      }`,
+      summary: latest
+        ? `${selectionContext} Latest history shows actual ${compactNumber(
+            latest.actual,
+          )}, forecast ${compactNumber(latest.forecast)}, previous ${compactNumber(
+            latest.previous,
+          )}.`
+        : `${selectionContext} No historical actual/forecast record was returned for this event.`,
+      value: latest
+        ? `Actual ${compactNumber(latest.actual)} / forecast ${compactNumber(
+            latest.forecast,
+          )}`
+        : `Next ${selected.date}`,
+      trend: "mixed",
+      source: "SoSoValue",
+      sourceUrl:
+        "https://sosovalue-1.gitbook.io/sosovalue-api-doc/8.-macro/events",
+      asOf: new Date().toISOString(),
+      raw: {
+        selected,
+        history,
+      },
+      series: series.length >= 2 ? series : undefined,
+    },
+  ]
 }
 
 async function newsEvidence(asset?: CurrencyListItem): Promise<EvidencePoint[]> {
@@ -707,8 +1044,9 @@ export async function collectSosoEvidence(thesis: string) {
   const assetSymbols = assets.map((asset) => asset.symbol)
   const evidenceGroups = await Promise.allSettled([
     ...assets.flatMap((asset) => [marketEvidence(asset), technicalEvidence(asset)]),
-    ...assets.map((asset) => etfEvidence(asset.symbol)),
+    ...assets.slice(0, 2).map((asset) => etfEvidence(asset.symbol)),
     indexEvidence(thesis, assetSymbols),
+    macroEvidence(thesis),
     newsEvidence(assets[0]),
   ])
 

@@ -1,9 +1,16 @@
 import type { EvidencePoint, SodexMarket } from "@/lib/types"
-import { compactNumber, percent, safeArray, stableId } from "@/lib/server-utils"
+import {
+  compactNumber,
+  percent,
+  safeArray,
+  stableId,
+  timeoutSignal,
+} from "@/lib/server-utils"
 
-const SODEX_SPOT_ENDPOINT =
-  process.env.SODEX_SPOT_ENDPOINT ??
-  "https://testnet-gw.sodex.dev/api/v1/spot"
+const SODEX_SPOT_ENDPOINT = (
+  process.env.SODEX_SPOT_ENDPOINT ?? "https://testnet-gw.sodex.dev/api/v1/spot"
+).replace(/\/+$/, "")
+const SODEX_FETCH_TIMEOUT_MS = 12 * 1000
 
 type SodexEnvelope<T> = {
   code?: number
@@ -24,6 +31,7 @@ async function sodexFetch<T>(path: string) {
       accept: "application/json",
     },
     cache: "no-store",
+    signal: timeoutSignal(SODEX_FETCH_TIMEOUT_MS),
   })
   const payload = (await response.json().catch(() => null)) as
     | SodexEnvelope<T>
